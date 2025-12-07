@@ -20,6 +20,8 @@ export function SpotifyOrganizer() {
   const [statusMessage, setStatusMessage] = useState('');
   const [showMigration, setShowMigration] = useState(false);
   const [migrationData, setMigrationData] = useState(null);
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
+  const [isSaving, setIsSaving] = useState(false); // Background save indicator
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -41,6 +43,18 @@ export function SpotifyOrganizer() {
     if (duration > 0) {
       setTimeout(() => setStatusMessage(''), duration);
     }
+  };
+
+  // Background save helper - updates UI immediately, syncs in background
+  const saveInBackground = async (newCategories) => {
+    setIsSaving(true);
+    try {
+      await spotify.saveCategoriesToSpotify(accessToken, userId, newCategories);
+    } catch (err) {
+      console.error('Background save failed:', err);
+      showStatus('⚠️ Sync failed - changes may not be saved', 4000);
+    }
+    setIsSaving(false);
   };
 
   const handleOAuthCallback = async (code) => {
@@ -196,82 +210,95 @@ export function SpotifyOrganizer() {
     if (!newCategoryName.trim() || categories[newCategoryName]) return;
     
     const categoryName = newCategoryName.trim();
-    showStatus('Creating category...');
     
-    try {
-      // Create visual playlist
-      const playlist = await spotify.createCategoryPlaylist(accessToken, userId, categoryName);
-      
-      // Update categories
-      const updatedCategories = { ...categories, [categoryName]: [] };
-      await spotify.saveCategoriesToSpotify(accessToken, userId, updatedCategories);
-      
-      setCategories(updatedCategories);
-      setCategoryPlaylists(prev => ({ ...prev, [categoryName]: playlist.id }));
-      setNewCategoryName('');
-      setShowNewCategory(false);
-      showStatus('✓ Category created');
-    } catch (err) {
-      console.error('Error creating category:', err);
-      showStatus('✗ Error creating category');
-    }
+    // Optimistic update - UI updates immediately
+    const updatedCategories = { ...categories, [categoryName]: [] };
+    setCategories(updatedCategories);
+    setNewCategoryName('');
+    setShowNewCategory(false);
+    showStatus('✓ Category created');
+    
+    // Background: Create playlist and save data
+    (async () => {
+      try {
+        const playlist = await spotify.createCategoryPlaylist(accessToken, userId, categoryName);
+        setCategoryPlaylists(prev => ({ ...prev, [categoryName]: playlist.id }));
+        await saveInBackground(updatedCategories);
+      } catch (err) {
+        console.error('Error creating category:', err);
+        showStatus('⚠️ Failed to sync category', 3000);
+      }
+    })();
   };
 
-  const deleteCategory = async (categoryName) => {
+  const deleteCategory = (categoryName) => {
     if (categoryName === 'Uncategorized') return;
     
     const playlistId = categoryPlaylists[categoryName];
     const artistsToMove = categories[categoryName] || [];
     
-    showStatus('Deleting category...');
+    // Optimistic update - UI updates immediately
+    const updatedCategories = { ...categories };
+    delete updatedCategories[categoryName];
+    updatedCategories['Uncategorized'] = [
+      ...(updatedCategories['Uncategorized'] || []),
+      ...artistsToMove
+    ];
     
-    try {
-      // Move artists to Uncategorized
-      const updatedCategories = { ...categories };
-      delete updatedCategories[categoryName];
-      updatedCategories['Uncategorized'] = [
-        ...(updatedCategories['Uncategorized'] || []),
-        ...artistsToMove
-      ];
-      
-      // Save updated categories
-      await spotify.saveCategoriesToSpotify(accessToken, userId, updatedCategories);
-      
-      // Delete visual playlist
-      if (playlistId) {
-        await spotify.deleteCategoryPlaylist(accessToken, playlistId);
+    setCategories(updatedCategories);
+    setCategoryPlaylists(prev => {
+      const { [categoryName]: deleted, ...rest } = prev;
+      return rest;
+    });
+    showStatus('✓ Category deleted');
+    
+    // Background: Delete playlist and save data
+    (async () => {
+      try {
+        await saveInBackground(updatedCategories);
+        if (playlistId) {
+          await spotify.deleteCategoryPlaylist(accessToken, playlistId);
+        }
+      } catch (err) {
+        console.error('Error deleting category:', err);
+        showStatus('⚠️ Failed to sync deletion', 3000);
       }
-      
-      setCategories(updatedCategories);
-      setCategoryPlaylists(prev => {
-        const { [categoryName]: deleted, ...rest } = prev;
-        return rest;
-      });
-      showStatus('✓ Category deleted');
-    } catch (err) {
-      console.error('Error deleting category:', err);
-      showStatus('✗ Error deleting category');
-    }
+    })();
   };
 
-  const moveArtist = async (artistId, fromCategory, toCategory) => {
+  const moveArtist = (artistId, fromCategory, toCategory) => {
     if (fromCategory === toCategory) return;
     
-    showStatus('Moving artist...', 1500);
+    // Optimistic update - UI updates immediately
+    const updatedCategories = { ...categories };
+    updatedCategories[fromCategory] = updatedCategories[fromCategory].filter(id => id !== artistId);
+    updatedCategories[toCategory] = [...(updatedCategories[toCategory] || []), artistId];
+    
+    setCategories(updatedCategories);
+    
+    // Background save
+    saveInBackground(updatedCategories);
+  };
 
+  const handleReset = async () => {
+    setShowResetConfirm(false);
+    setLoading(true);
+    setLoadingMessage('Resetting all data...');
+    
     try {
-      const updatedCategories = { ...categories };
-      updatedCategories[fromCategory] = updatedCategories[fromCategory].filter(id => id !== artistId);
-      updatedCategories[toCategory] = [...(updatedCategories[toCategory] || []), artistId];
+      await spotify.resetAllData(accessToken, userId);
+      setCategories({});
+      setCategoryPlaylists({});
       
-      await spotify.saveCategoriesToSpotify(accessToken, userId, updatedCategories);
-      
-      setCategories(updatedCategories);
-      showStatus('✓ Artist moved', 1500);
+      // Reload fresh data
+      await loadData(accessToken, userId);
+      showStatus('✓ Reset complete');
     } catch (err) {
-      console.error('Error moving artist:', err);
-      showStatus('✗ Error moving artist');
+      console.error('Reset error:', err);
+      showStatus('✗ Reset failed');
     }
+    
+    setLoading(false);
   };
 
   const syncWithSpotify = async () => {
@@ -307,6 +334,34 @@ export function SpotifyOrganizer() {
     setCategories({});
     setCategoryPlaylists({});
   };
+
+  // ============================================
+  // RENDER: Reset Confirmation Dialog
+  // ============================================
+  if (showResetConfirm) {
+    return h('div', { className: 'min-h-screen bg-gradient-to-br from-green-900 via-black to-black flex items-center justify-center p-4' },
+      h('div', { className: 'bg-gray-900 rounded-lg p-8 max-w-lg w-full text-center shadow-2xl' },
+        h('div', { className: 'text-6xl mb-4' }, '⚠️'),
+        h('h1', { className: 'text-2xl font-bold text-white mb-4' }, 'Reset All Categories?'),
+        h('p', { className: 'text-gray-300 mb-4' }, 
+          'This will delete all your categories and playlists created by Artist Organizer.'
+        ),
+        h('p', { className: 'text-red-400 mb-6 text-sm font-semibold' }, 
+          'This action cannot be undone!'
+        ),
+        h('div', { className: 'flex gap-4 justify-center' },
+          h('button', {
+            onClick: handleReset,
+            className: 'bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-6 rounded-full'
+          }, '🗑️ Yes, Reset Everything'),
+          h('button', {
+            onClick: () => setShowResetConfirm(false),
+            className: 'bg-gray-700 hover:bg-gray-600 text-white py-2 px-6 rounded-full'
+          }, 'Cancel')
+        )
+      )
+    );
+  }
 
   // ============================================
   // RENDER: Migration Dialog
@@ -424,9 +479,15 @@ export function SpotifyOrganizer() {
             className: 'bg-green-500 hover:bg-green-600 text-black font-semibold py-2 px-4 rounded-full'
           }, '➕ New Category'),
           h('button', {
+            onClick: () => setShowResetConfirm(true),
+            className: 'bg-red-600 hover:bg-red-700 text-white py-2 px-4 rounded-full text-sm'
+          }, '🗑️ Reset'),
+          h('button', {
             onClick: handleLogout,
             className: 'bg-gray-700 hover:bg-gray-600 text-white py-2 px-4 rounded-full text-sm'
-          }, '🚪 Logout')
+          }, '🚪 Logout'),
+          // Saving indicator
+          isSaving && h('span', { className: 'text-yellow-400 text-sm animate-pulse' }, '💾 Saving...')
         )
       ),
       
