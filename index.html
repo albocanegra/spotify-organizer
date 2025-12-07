@@ -4,6 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Spotify Artist Organizer</title>
+  <!-- Emoji favicon -->
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎸</text></svg>">
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://cdn.tailwindcss.com"></script>
@@ -16,7 +18,7 @@
 
   <script type="module">
     // Cache busting: Update this version when deploying
-    const VERSION = '4.2.0';
+    const VERSION = '4.3.0';
     
     // Dynamic import with cache busting
     const { SpotifyOrganizer } = await import(`./js/app.js?v=${VERSION}`);

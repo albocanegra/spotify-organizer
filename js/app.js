@@ -23,6 +23,28 @@ export function SpotifyOrganizer() {
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [isSaving, setIsSaving] = useState(false); // Background save indicator
   const [searchQuery, setSearchQuery] = useState('');
+  const [collapsedCategories, setCollapsedCategories] = useState(new Set());
+  const [showMenu, setShowMenu] = useState(false);
+
+  const toggleCategoryCollapse = (categoryName) => {
+    setCollapsedCategories(prev => {
+      const next = new Set(prev);
+      if (next.has(categoryName)) {
+        next.delete(categoryName);
+      } else {
+        next.add(categoryName);
+      }
+      return next;
+    });
+  };
+
+  const collapseAll = () => {
+    setCollapsedCategories(new Set(Object.keys(categories)));
+  };
+
+  const expandAll = () => {
+    setCollapsedCategories(new Set());
+  };
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -477,46 +499,87 @@ export function SpotifyOrganizer() {
       h('div', { className: 'flex items-center justify-between mb-6 flex-wrap gap-4' },
         h('div', { className: 'flex items-center gap-3' },
           h('div', { className: 'text-4xl' }, '🎸'),
-          h('h1', { className: 'text-2xl font-bold text-white' }, 'My Artist Library'),
-          h('span', { className: 'bg-green-500 text-black px-3 py-1 rounded-full text-sm font-semibold' }, `${artists.length} artists`),
-          h('span', { className: 'bg-gray-800 text-gray-400 px-2 py-1 rounded text-xs' }, APP_VERSION)
+          h('h1', { className: 'text-2xl font-bold text-white hidden sm:block' }, 'Artist Organizer'),
+          h('span', { className: 'bg-green-500 text-black px-3 py-1 rounded-full text-sm font-semibold' }, `${artists.length}`),
+          isSaving && h('span', { className: 'text-yellow-400 text-sm animate-pulse' }, '💾')
         ),
-        h('div', { className: 'flex gap-2 flex-wrap' },
-          h('select', {
-            onChange: (e) => {
-              if (e.target.value) {
-                scrollToCategory(e.target.value);
-                e.target.value = '';
-              }
-            },
-            className: 'bg-gray-800 text-white px-4 py-2 rounded-full border border-gray-700 cursor-pointer text-sm'
-          },
-            h('option', { value: '' }, '📂 Jump to Category...'),
-            categoryEntries.map(([cat, artistIds]) => 
-              h('option', { key: cat, value: cat }, `${cat} (${artistIds.length})`)
-            )
-          ),
+        h('div', { className: 'flex items-center gap-2' },
+          // Quick actions (always visible)
+          h('button', {
+            onClick: () => setShowNewCategory(!showNewCategory),
+            className: 'bg-green-500 hover:bg-green-600 text-black font-semibold py-2 px-4 rounded-full text-sm',
+            title: 'New Category'
+          }, '➕'),
           h('button', {
             onClick: syncWithSpotify,
             disabled: syncing,
-            className: 'bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-4 rounded-full text-sm disabled:opacity-50'
-          }, syncing ? '🔄 Syncing...' : '🔄 Sync'),
-          h('button', {
-            onClick: () => setShowNewCategory(!showNewCategory),
-            className: 'bg-green-500 hover:bg-green-600 text-black font-semibold py-2 px-4 rounded-full'
-          }, '➕ New Category'),
-          h('button', {
-            onClick: () => setShowResetConfirm(true),
-            className: 'bg-red-600 hover:bg-red-700 text-white py-2 px-4 rounded-full text-sm'
-          }, '🗑️ Reset'),
-          h('button', {
-            onClick: handleLogout,
-            className: 'bg-gray-700 hover:bg-gray-600 text-white py-2 px-4 rounded-full text-sm'
-          }, '🚪 Logout'),
-          // Saving indicator
-          isSaving && h('span', { className: 'text-yellow-400 text-sm animate-pulse' }, '💾 Saving...')
+            className: 'bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-4 rounded-full text-sm disabled:opacity-50',
+            title: 'Sync with Spotify'
+          }, syncing ? '🔄' : '🔄'),
+          
+          // Menu dropdown
+          h('div', { className: 'relative' },
+            h('button', {
+              onClick: () => setShowMenu(!showMenu),
+              className: 'bg-gray-700 hover:bg-gray-600 text-white py-2 px-4 rounded-full text-sm'
+            }, '☰'),
+            showMenu && h('div', { 
+              className: 'absolute right-0 top-12 bg-gray-800 border border-gray-700 rounded-lg shadow-xl z-50 min-w-48'
+            },
+              // Jump to category
+              h('div', { className: 'p-2 border-b border-gray-700' },
+                h('select', {
+                  onChange: (e) => {
+                    if (e.target.value) {
+                      scrollToCategory(e.target.value);
+                      e.target.value = '';
+                      setShowMenu(false);
+                    }
+                  },
+                  className: 'w-full bg-gray-700 text-white px-3 py-2 rounded text-sm'
+                },
+                  h('option', { value: '' }, '📂 Jump to...'),
+                  categoryEntries.map(([cat, artistIds]) => 
+                    h('option', { key: cat, value: cat }, `${cat} (${artistIds.length})`)
+                  )
+                )
+              ),
+              // View options
+              h('div', { className: 'p-1 border-b border-gray-700' },
+                h('button', {
+                  onClick: () => { expandAll(); setShowMenu(false); },
+                  className: 'w-full text-left px-3 py-2 text-white hover:bg-gray-700 rounded text-sm'
+                }, '📂 Expand All'),
+                h('button', {
+                  onClick: () => { collapseAll(); setShowMenu(false); },
+                  className: 'w-full text-left px-3 py-2 text-white hover:bg-gray-700 rounded text-sm'
+                }, '📁 Collapse All')
+              ),
+              // Danger zone
+              h('div', { className: 'p-1 border-b border-gray-700' },
+                h('button', {
+                  onClick: () => { setShowResetConfirm(true); setShowMenu(false); },
+                  className: 'w-full text-left px-3 py-2 text-red-400 hover:bg-gray-700 rounded text-sm'
+                }, '🗑️ Reset All')
+              ),
+              // Account
+              h('div', { className: 'p-1' },
+                h('button', {
+                  onClick: () => { handleLogout(); setShowMenu(false); },
+                  className: 'w-full text-left px-3 py-2 text-gray-300 hover:bg-gray-700 rounded text-sm'
+                }, '🚪 Logout'),
+                h('div', { className: 'px-3 py-2 text-gray-500 text-xs' }, APP_VERSION)
+              )
+            )
+          )
         )
       ),
+      
+      // Click outside to close menu
+      showMenu && h('div', {
+        className: 'fixed inset-0 z-40',
+        onClick: () => setShowMenu(false)
+      }),
       
       // New category form
       showNewCategory && h('div', { className: 'bg-gray-900 rounded-lg p-4 mb-6 flex flex-col sm:flex-row gap-2' },
@@ -592,16 +655,23 @@ export function SpotifyOrganizer() {
               className: 'bg-green-500 hover:bg-green-600 text-black font-semibold py-2 px-4 rounded-full'
             }, '➕ Create First Category')
           )
-        : h('div', { className: 'space-y-6' },
+        : h('div', { className: 'space-y-4' },
             categoryEntries.map(([categoryName, artistIds]) => {
               const categoryArtists = artistIds.map(id => getArtistById(id)).filter(Boolean);
+              const isCollapsed = collapsedCategories.has(categoryName);
+              
               return h('div', { 
                 key: categoryName, 
                 id: `category-${categoryName}`,
-                className: 'bg-gray-900 rounded-lg p-4 scroll-mt-6'
+                className: 'bg-gray-900 rounded-lg scroll-mt-6 overflow-hidden'
               },
-                h('div', { className: 'flex items-center justify-between mb-4' },
+                // Category header (clickable to collapse)
+                h('div', { 
+                  className: 'flex items-center justify-between p-4 cursor-pointer hover:bg-gray-800/50 transition-colors',
+                  onClick: () => toggleCategoryCollapse(categoryName)
+                },
                   h('div', { className: 'flex items-center gap-2' },
+                    h('div', { className: 'text-lg transition-transform ' + (isCollapsed ? '' : 'rotate-90') }, '▶'),
                     h('div', { className: 'text-2xl' }, categoryName === 'Uncategorized' ? '📥' : '📁'),
                     h('h2', { className: 'text-xl font-bold text-white' }, categoryName),
                     h('span', { className: 'text-gray-400 text-sm' }, `(${categoryArtists.length})`),
@@ -609,21 +679,24 @@ export function SpotifyOrganizer() {
                       href: `https://open.spotify.com/playlist/${categoryPlaylists[categoryName]}`,
                       target: '_blank',
                       rel: 'noopener noreferrer',
-                      className: 'text-green-400 hover:text-green-300 text-xs ml-2'
-                    }, '↗ Playlist')
+                      className: 'text-green-400 hover:text-green-300 text-xs ml-2',
+                      onClick: (e) => e.stopPropagation()
+                    }, '↗')
                   ),
                   categoryName !== 'Uncategorized' && h('button', {
-                    onClick: () => deleteCategory(categoryName),
+                    onClick: (e) => { e.stopPropagation(); deleteCategory(categoryName); },
                     className: 'text-red-400 hover:text-red-300 text-xl'
                   }, '🗑️')
                 ),
-                categoryArtists.length === 0
-                  ? h('p', { className: 'text-gray-500 text-sm italic' }, 'No artists in this category')
-                  : h('div', { className: 'grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3' },
-                      categoryArtists.map(artist =>
-                        h('div', { key: artist.id, className: 'bg-gray-800 rounded-lg p-3' },
-                          h('img', {
-                            src: artist.images[0]?.url || 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="100" height="100"%3E%3Crect fill="%23374151" width="100" height="100"/%3E%3C/svg%3E',
+                // Category content (collapsible)
+                !isCollapsed && h('div', { className: 'p-4 pt-0' },
+                  categoryArtists.length === 0
+                    ? h('p', { className: 'text-gray-500 text-sm italic' }, 'No artists in this category')
+                    : h('div', { className: 'grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3' },
+                        categoryArtists.map(artist =>
+                          h('div', { key: artist.id, className: 'bg-gray-800 rounded-lg p-3' },
+                            h('img', {
+                              src: artist.images[0]?.url || 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="100" height="100"%3E%3Crect fill="%23374151" width="100" height="100"/%3E%3C/svg%3E',
                             alt: artist.name,
                             className: 'w-full aspect-square object-cover rounded mb-2'
                           }),
@@ -634,14 +707,15 @@ export function SpotifyOrganizer() {
                             rel: 'noopener noreferrer',
                             className: 'block bg-green-500 hover:bg-green-600 text-black text-xs py-1 px-2 rounded text-center mb-2'
                           }, '🔗 Open in Spotify'),
-                          h('select', {
-                            value: categoryName,
-                            onChange: (e) => moveArtist(artist.id, categoryName, e.target.value),
-                            className: 'w-full bg-gray-700 text-white text-xs py-1 px-2 rounded border border-gray-600 outline-none'
-                          }, categoryEntries.map(([cat]) => h('option', { key: cat, value: cat }, cat)))
+                            h('select', {
+                              value: categoryName,
+                              onChange: (e) => moveArtist(artist.id, categoryName, e.target.value),
+                              className: 'w-full bg-gray-700 text-white text-xs py-1 px-2 rounded border border-gray-600 outline-none'
+                            }, categoryEntries.map(([cat]) => h('option', { key: cat, value: cat }, cat)))
+                          )
                         )
                       )
-                    )
+                )
               );
             })
           )
