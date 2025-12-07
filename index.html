@@ -55,7 +55,8 @@
       const REDIRECT_URI = 'https://albocanegra.github.io/spotify-organizer';
       const SCOPES = 'user-follow-read playlist-read-private playlist-modify-private playlist-modify-public';
       
-      const CATEGORY_PREFIX = '__ARTIST_CATEGORY__';
+      const STORAGE_PLAYLIST_NAME = '__ARTIST_ORGANIZER_DATA__';
+      const APP_VERSION = 'v2.1.0';
 
       useEffect(() => {
         const params = new URLSearchParams(window.location.search);
@@ -165,43 +166,42 @@
         })
         .then(res => res.json())
         .then(data => {
-          const categoryPlaylists = data.items.filter(p => 
-            p.name.startsWith(CATEGORY_PREFIX) && p.owner.id === uid
+          const storagePlaylist = data.items.find(p => 
+            p.name === STORAGE_PLAYLIST_NAME && p.owner.id === uid
           );
           
-          if (categoryPlaylists.length === 0) {
+          if (!storagePlaylist) {
             return { 'Uncategorized': [] };
           }
 
-          const loadedCategories = {};
-          
-          return Promise.all(
-            categoryPlaylists.map(playlist => {
-              const categoryName = playlist.name.replace(CATEGORY_PREFIX, '');
-              
-              return fetch(playlist.tracks.href, {
-                headers: { 'Authorization': `Bearer ${token}` }
-              })
-              .then(res => res.json())
-              .then(tracksData => {
-                const artistIds = tracksData.items
-                  .map(item => item.track?.artists?.[0]?.id)
-                  .filter(Boolean);
-                loadedCategories[categoryName] = artistIds;
-              });
-            })
-          ).then(() => {
-            if (!loadedCategories['Uncategorized']) {
-              loadedCategories['Uncategorized'] = [];
+          try {
+            const categoriesData = JSON.parse(storagePlaylist.description || '{}');
+            if (!categoriesData.Uncategorized) {
+              categoriesData.Uncategorized = [];
             }
-            setCategories(loadedCategories);
-            return loadedCategories;
-          });
+            setCategories(categoriesData);
+            return categoriesData;
+          } catch (e) {
+            console.error('Error parsing categories:', e);
+            return { 'Uncategorized': [] };
+          }
+        })
+        .catch(err => {
+          console.error('Error loading categories:', err);
+          return { 'Uncategorized': [] };
         });
       };
 
-      const saveCategoryToSpotify = (token, uid, categoryName, artistIds) => {
-        const playlistName = CATEGORY_PREFIX + categoryName;
+      const saveCategoriesToSpotify = (token, uid, categoriesToSave) => {
+        const dataString = JSON.stringify(categoriesToSave);
+        
+        // Spotify descriptions have a 300 char limit, so we need to check
+        if (dataString.length > 280) {
+          // If data is too large, store in localStorage as backup and show warning
+          localStorage.setItem('categories_backup', dataString);
+          showStatus('⚠️ Too many categories - using local storage', 4000);
+          return Promise.resolve();
+        }
         
         return fetch('https://api.spotify.com/v1/me/playlists?limit=50', {
           headers: { 'Authorization': `Bearer ${token}` }
@@ -209,20 +209,22 @@
         .then(res => res.json())
         .then(data => {
           const existingPlaylist = data.items.find(p => 
-            p.name === playlistName && p.owner.id === uid
+            p.name === STORAGE_PLAYLIST_NAME && p.owner.id === uid
           );
           
           if (existingPlaylist) {
-            return fetch(`https://api.spotify.com/v1/playlists/${existingPlaylist.id}/tracks`, {
+            return fetch(`https://api.spotify.com/v1/playlists/${existingPlaylist.id}`, {
               method: 'PUT',
               headers: {
                 'Authorization': `Bearer ${token}`,
                 'Content-Type': 'application/json'
               },
               body: JSON.stringify({
-                uris: artistIds.slice(0, 100).map(id => `spotify:artist:${id}`)
+                name: STORAGE_PLAYLIST_NAME,
+                description: dataString,
+                public: false
               })
-            }).then(() => existingPlaylist.id);
+            });
           } else {
             return fetch(`https://api.spotify.com/v1/users/${uid}/playlists`, {
               method: 'POST',
@@ -231,49 +233,17 @@
                 'Content-Type': 'application/json'
               },
               body: JSON.stringify({
-                name: playlistName,
-                description: 'Artist category for organizer app',
+                name: STORAGE_PLAYLIST_NAME,
+                description: dataString,
                 public: false
               })
-            })
-            .then(res => res.json())
-            .then(newPlaylist => {
-              if (artistIds.length > 0) {
-                return fetch(`https://api.spotify.com/v1/playlists/${newPlaylist.id}/tracks`, {
-                  method: 'POST',
-                  headers: {
-                    'Authorization': `Bearer ${token}`,
-                    'Content-Type': 'application/json'
-                  },
-                  body: JSON.stringify({
-                    uris: artistIds.slice(0, 100).map(id => `spotify:artist:${id}`)
-                  })
-                }).then(() => newPlaylist.id);
-              }
-              return newPlaylist.id;
             });
           }
-        });
-      };
-
-      const deleteCategoryFromSpotify = (token, uid, categoryName) => {
-        const playlistName = CATEGORY_PREFIX + categoryName;
-        
-        return fetch('https://api.spotify.com/v1/me/playlists?limit=50', {
-          headers: { 'Authorization': `Bearer ${token}` }
         })
-        .then(res => res.json())
-        .then(data => {
-          const playlist = data.items.find(p => 
-            p.name === playlistName && p.owner.id === uid
-          );
-          
-          if (playlist) {
-            return fetch(`https://api.spotify.com/v1/playlists/${playlist.id}/followers`, {
-              method: 'DELETE',
-              headers: { 'Authorization': `Bearer ${token}` }
-            });
-          }
+        .catch(err => {
+          console.error('Error saving to Spotify:', err);
+          localStorage.setItem('categories_backup', dataString);
+          showStatus('⚠️ Saved locally only', 3000);
         });
       };
 
@@ -329,9 +299,7 @@
             if (unfollowedIds.size > 0 || uncategorized.length > 0) {
               setCategories(updated);
               if (accessToken && userId) {
-                Object.entries(updated).forEach(([catName, artistIds]) => {
-                  saveCategoryToSpotify(accessToken, userId, catName, artistIds);
-                });
+                saveCategoriesToSpotify(accessToken, userId, updated);
               }
             }
             
@@ -343,7 +311,7 @@
         if (newCategoryName.trim() && !categories[newCategoryName]) {
           const updated = { ...categories, [newCategoryName]: [] };
           setCategories(updated);
-          saveCategoryToSpotify(accessToken, userId, newCategoryName, [])
+          saveCategoriesToSpotify(accessToken, userId, updated)
             .then(() => showStatus('✓ Category created'))
             .catch(err => showStatus('✗ Error creating category'));
           setNewCategoryName('');
@@ -357,11 +325,8 @@
         const updated = { ...rest, 'Uncategorized': [...rest.Uncategorized, ...deleted] };
         setCategories(updated);
         
-        deleteCategoryFromSpotify(accessToken, userId, categoryName)
-          .then(() => {
-            saveCategoryToSpotify(accessToken, userId, 'Uncategorized', updated['Uncategorized']);
-            showStatus('✓ Category deleted');
-          })
+        saveCategoriesToSpotify(accessToken, userId, updated)
+          .then(() => showStatus('✓ Category deleted'))
           .catch(err => showStatus('✗ Error deleting category'));
       };
 
@@ -371,12 +336,9 @@
         updated[toCategory] = [...updated[toCategory], artistId];
         setCategories(updated);
         
-        Promise.all([
-          saveCategoryToSpotify(accessToken, userId, fromCategory, updated[fromCategory]),
-          saveCategoryToSpotify(accessToken, userId, toCategory, updated[toCategory])
-        ])
-        .then(() => showStatus('✓ Artist moved', 1500))
-        .catch(err => showStatus('✗ Error moving artist'));
+        saveCategoriesToSpotify(accessToken, userId, updated)
+          .then(() => showStatus('✓ Artist moved', 1500))
+          .catch(err => showStatus('✗ Error moving artist'));
       };
 
       const syncWithSpotify = () => {
@@ -417,7 +379,8 @@
             h('div', { className: 'bg-gray-800 border border-gray-700 rounded p-4 mb-6 text-left text-sm' },
               h('p', { className: 'text-gray-300 mb-2' }, 'Connect your Spotify account to start organizing your followed artists into custom categories.'),
               h('p', { className: 'text-green-400 text-xs font-semibold mb-2' }, '✓ Syncs across all your devices'),
-              h('p', { className: 'text-gray-400 text-xs' }, 'Your categories are stored privately in your Spotify account as hidden playlists.')
+              h('p', { className: 'text-gray-400 text-xs mb-2' }, 'Your categories are stored privately in your Spotify account.'),
+              h('p', { className: 'text-gray-500 text-xs text-right' }, APP_VERSION)
             ),
             h('button', {
               onClick: handleLogin,
@@ -445,7 +408,8 @@
             h('div', { className: 'flex items-center gap-3' },
               h('div', { className: 'text-4xl' }, '🎵'),
               h('h1', { className: 'text-2xl font-bold text-white' }, 'My Artist Library'),
-              h('span', { className: 'bg-green-500 text-black px-3 py-1 rounded-full text-sm font-semibold' }, `${artists.length} artists`)
+              h('span', { className: 'bg-green-500 text-black px-3 py-1 rounded-full text-sm font-semibold' }, `${artists.length} artists`),
+              h('span', { className: 'bg-gray-800 text-gray-400 px-2 py-1 rounded text-xs' }, APP_VERSION)
             ),
             h('div', { className: 'flex gap-2 flex-wrap' },
               h('select', {
