@@ -90,10 +90,10 @@ export function SpotifyOrganizer() {
     
     // Check if data was corrupted
     if (loadedCategories._corrupted) {
-      console.log('Data was corrupted, resetting...');
-      setLoadingMessage('Data corrupted, cleaning up...');
-      await spotify.resetAllData(token, uid);
+      console.warn('Data appears corrupted - starting with empty categories');
+      showStatus('⚠️ Data issue detected - your categories may need to be restored', 5000);
       loadedCategories = {};
+      // Don't auto-reset - let user decide
     }
     
     setLoadingMessage('Loading followed artists...');

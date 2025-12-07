@@ -168,6 +168,20 @@ function getDataPlaylistName(index) {
   return index === 0 ? DATA_PLAYLIST_PREFIX : `${DATA_PLAYLIST_PREFIX}_${index + 1}`;
 }
 
+// Get valid data playlist names (exact matches only)
+function isValidDataPlaylistName(name) {
+  if (name === DATA_PLAYLIST_PREFIX) return true;
+  const match = name.match(new RegExp(`^${DATA_PLAYLIST_PREFIX}_(\\d+)$`));
+  return match !== null;
+}
+
+function getDataPlaylistIndex(name) {
+  if (name === DATA_PLAYLIST_PREFIX) return 0;
+  const match = name.match(new RegExp(`^${DATA_PLAYLIST_PREFIX}_(\\d+)$`));
+  if (match) return parseInt(match[1], 10) - 1;
+  return -1;
+}
+
 export async function saveCategoriesToSpotify(token, userId, categories) {
   const jsonString = JSON.stringify(categories);
   const chunks = chunkData(jsonString, DESCRIPTION_MAX_LENGTH);
@@ -214,25 +228,30 @@ async function getPlaylistDetails(token, playlistId) {
 export async function loadCategoriesFromSpotify(token, userId) {
   const allPlaylists = await getUserPlaylists(token);
   
-  // Find and sort data playlists
+  // Find data playlists with EXACT name matches only
   const dataPlaylistRefs = allPlaylists
-    .filter(p => p?.name?.startsWith(DATA_PLAYLIST_PREFIX) && p.owner.id === userId)
-    .sort((a, b) => a.name.localeCompare(b.name));
+    .filter(p => p?.owner?.id === userId && isValidDataPlaylistName(p?.name))
+    .sort((a, b) => getDataPlaylistIndex(a.name) - getDataPlaylistIndex(b.name));
+  
+  console.log('Found data playlists:', dataPlaylistRefs.map(p => p.name));
   
   if (dataPlaylistRefs.length === 0) {
     return {};
   }
   
   // Fetch full details for each data playlist to get complete descriptions
-  const descriptions = [];
+  // Sort by index to ensure correct order
+  const descriptions = new Array(dataPlaylistRefs.length);
   for (const playlistRef of dataPlaylistRefs) {
+    const index = getDataPlaylistIndex(playlistRef.name);
     const fullPlaylist = await getPlaylistDetails(token, playlistRef.id);
-    descriptions.push(fullPlaylist.description || '');
+    console.log(`Playlist ${playlistRef.name} (index ${index}):`, fullPlaylist.description?.substring(0, 50) + '...');
+    descriptions[index] = fullPlaylist.description || '';
     await delay(50);
   }
   
-  // Reconstruct JSON from chunks
-  let jsonString = descriptions.join('');
+  // Reconstruct JSON from chunks (filter out any undefined slots)
+  let jsonString = descriptions.filter(d => d !== undefined).join('');
   
   // Spotify sometimes HTML-encodes the description, decode common entities
   jsonString = jsonString
@@ -246,9 +265,8 @@ export async function loadCategoriesFromSpotify(token, userId) {
     .replace(/&apos;/g, "'");
   
   // Debug logging
-  console.log('Loaded JSON string:', jsonString.substring(0, 200) + '...');
+  console.log('Reconstructed JSON:', jsonString.substring(0, 200) + '...');
   console.log('Total length:', jsonString.length);
-  console.log('Number of data playlists:', dataPlaylistRefs.length);
   
   if (!jsonString || jsonString.trim() === '') {
     console.log('No data found in playlists');
@@ -256,25 +274,40 @@ export async function loadCategoriesFromSpotify(token, userId) {
   }
   
   try {
-    return JSON.parse(jsonString);
+    const parsed = JSON.parse(jsonString);
+    console.log('Successfully parsed categories:', Object.keys(parsed));
+    return parsed;
   } catch (e) {
     console.error('Failed to parse categories data:', e);
+    console.error('Raw JSON:', jsonString);
     
-    // Try to extract valid JSON - find the first complete JSON object
-    const match = jsonString.match(/^\{[\s\S]*?\}(?=\{|$|[^"\]}])/);
-    if (match) {
-      try {
-        console.log('Attempting to parse partial JSON...');
-        const parsed = JSON.parse(match[0]);
-        console.log('Successfully parsed partial data');
-        return parsed;
-      } catch (e2) {
-        console.error('Partial parse also failed');
+    // Try to find a valid JSON object in the string
+    // Look for balanced braces
+    let braceCount = 0;
+    let start = jsonString.indexOf('{');
+    if (start === -1) {
+      console.error('No JSON object found');
+      return { _corrupted: true };
+    }
+    
+    for (let i = start; i < jsonString.length; i++) {
+      if (jsonString[i] === '{') braceCount++;
+      else if (jsonString[i] === '}') braceCount--;
+      
+      if (braceCount === 0) {
+        const validJson = jsonString.substring(start, i + 1);
+        try {
+          console.log('Attempting to parse valid portion...');
+          const parsed = JSON.parse(validJson);
+          console.log('Recovered categories:', Object.keys(parsed));
+          return parsed;
+        } catch (e2) {
+          console.error('Recovery failed:', e2);
+          break;
+        }
       }
     }
     
-    // Data is corrupted, return empty to start fresh
-    console.error('Data corrupted, returning empty categories');
     return { _corrupted: true };
   }
 }

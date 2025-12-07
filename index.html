@@ -15,8 +15,12 @@
   <div id="root"></div>
 
   <script type="module">
-    import { SpotifyOrganizer } from './js/app.js';
+    // Cache busting: Update this version when deploying
+    const VERSION = '4.0.3';
     
+    // Dynamic import with cache busting
+    const { SpotifyOrganizer } = await import(`./js/app.js?v=${VERSION}`);
+
     const root = ReactDOM.createRoot(document.getElementById('root'));
     root.render(React.createElement(SpotifyOrganizer));
   </script>
