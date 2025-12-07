@@ -1,6 +1,6 @@
 // Main React Application Component
 
-import { APP_VERSION } from './config.js';
+import { APP_VERSION, ALLOWED_USER_IDS } from './config.js';
 import { initiateLogin, exchangeCodeForToken, getStoredToken, clearAuth } from './auth.js';
 import * as spotify from './spotify-api.js';
 
@@ -76,6 +76,15 @@ export function SpotifyOrganizer() {
     try {
       setLoadingMessage('Getting user info...');
       const userData = await spotify.getCurrentUser(token);
+      
+      // Access control: Check if user is allowed (if restriction is enabled)
+      if (ALLOWED_USER_IDS.length > 0 && !ALLOWED_USER_IDS.includes(userData.id)) {
+        setLoading(false);
+        clearAuth();
+        showStatus('⛔ Access denied - you are not authorized to use this app', 0);
+        return;
+      }
+      
       setUserId(userData.id);
       
       // Check for old format and offer migration
