@@ -58,11 +58,27 @@ export async function getCurrentUser(token) {
 }
 
 export async function getFollowedArtists(token) {
-  return fetchAllPages(
-    'https://api.spotify.com/v1/me/following?type=artist&limit=50',
-    token,
-    data => data.artists?.items
-  );
+  // The following endpoint has a different pagination structure
+  const results = [];
+  let url = 'https://api.spotify.com/v1/me/following?type=artist&limit=50';
+  
+  while (url) {
+    const response = await rateLimitedFetch(url, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    const data = await response.json();
+    
+    if (data.artists?.items) {
+      results.push(...data.artists.items);
+    }
+    
+    // Following endpoint uses data.artists.next, not data.next
+    url = data.artists?.next || null;
+    
+    if (url) await delay(100);
+  }
+  
+  return results;
 }
 
 // ============================================
@@ -187,25 +203,61 @@ export async function saveCategoriesToSpotify(token, userId, categories) {
   }
 }
 
+async function getPlaylistDetails(token, playlistId) {
+  const response = await rateLimitedFetch(
+    `https://api.spotify.com/v1/playlists/${playlistId}?fields=id,name,description`,
+    { headers: { 'Authorization': `Bearer ${token}` } }
+  );
+  return response.json();
+}
+
 export async function loadCategoriesFromSpotify(token, userId) {
   const allPlaylists = await getUserPlaylists(token);
   
   // Find and sort data playlists
-  const dataPlaylists = allPlaylists
+  const dataPlaylistRefs = allPlaylists
     .filter(p => p?.name?.startsWith(DATA_PLAYLIST_PREFIX) && p.owner.id === userId)
     .sort((a, b) => a.name.localeCompare(b.name));
   
-  if (dataPlaylists.length === 0) {
+  if (dataPlaylistRefs.length === 0) {
     return {};
   }
   
+  // Fetch full details for each data playlist to get complete descriptions
+  const descriptions = [];
+  for (const playlistRef of dataPlaylistRefs) {
+    const fullPlaylist = await getPlaylistDetails(token, playlistRef.id);
+    descriptions.push(fullPlaylist.description || '');
+    await delay(50);
+  }
+  
   // Reconstruct JSON from chunks
-  const jsonString = dataPlaylists.map(p => p.description || '').join('');
+  let jsonString = descriptions.join('');
+  
+  // Spotify sometimes HTML-encodes the description, decode common entities
+  jsonString = jsonString
+    .replace(/&quot;/g, '"')
+    .replace(/&#34;/g, '"')
+    .replace(/&amp;/g, '&')
+    .replace(/&#38;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'");
+  
+  // Debug logging
+  console.log('Loaded JSON string:', jsonString.substring(0, 200) + '...');
+  
+  if (!jsonString || jsonString.trim() === '') {
+    console.log('No data found in playlists');
+    return {};
+  }
   
   try {
     return JSON.parse(jsonString);
   } catch (e) {
     console.error('Failed to parse categories data:', e);
+    console.error('Raw JSON string:', jsonString);
     return {};
   }
 }
