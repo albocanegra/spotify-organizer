@@ -22,6 +22,7 @@ export function SpotifyOrganizer() {
   const [migrationData, setMigrationData] = useState(null);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [isSaving, setIsSaving] = useState(false); // Background save indicator
+  const [searchQuery, setSearchQuery] = useState('');
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -334,6 +335,23 @@ export function SpotifyOrganizer() {
   };
 
   const getArtistById = (id) => artists.find(a => a.id === id);
+  
+  const getArtistCategory = (artistId) => {
+    for (const [categoryName, artistIds] of Object.entries(categories)) {
+      if (artistIds.includes(artistId)) return categoryName;
+    }
+    return null;
+  };
+  
+  // Filter artists by search query
+  const getFilteredArtists = () => {
+    if (!searchQuery.trim()) return [];
+    const query = searchQuery.toLowerCase();
+    return artists
+      .filter(a => a.name.toLowerCase().includes(query))
+      .map(a => ({ ...a, category: getArtistCategory(a.id) }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  };
 
   const handleLogout = () => {
     clearAuth();
@@ -518,6 +536,51 @@ export function SpotifyOrganizer() {
           onClick: () => setShowNewCategory(false),
           className: 'bg-gray-700 hover:bg-gray-600 text-white px-4 py-2 rounded'
         }, 'Cancel')
+      ),
+      
+      // Search bar
+      h('div', { className: 'mb-6' },
+        h('div', { className: 'relative' },
+          h('input', {
+            type: 'text',
+            value: searchQuery,
+            onChange: (e) => setSearchQuery(e.target.value),
+            placeholder: '🔍 Search artists...',
+            className: 'w-full bg-gray-800 text-white px-4 py-3 rounded-lg border border-gray-700 focus:border-green-500 outline-none text-lg'
+          }),
+          searchQuery && h('button', {
+            onClick: () => setSearchQuery(''),
+            className: 'absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-white text-xl'
+          }, '✕')
+        )
+      ),
+      
+      // Search results (shown when searching)
+      searchQuery.trim() && h('div', { className: 'bg-gray-900 rounded-lg p-4 mb-6' },
+        h('div', { className: 'flex items-center justify-between mb-4' },
+          h('h2', { className: 'text-xl font-bold text-white' }, `Search Results`),
+          h('span', { className: 'text-gray-400 text-sm' }, `${getFilteredArtists().length} found`)
+        ),
+        getFilteredArtists().length === 0
+          ? h('p', { className: 'text-gray-500 italic' }, 'No artists found')
+          : h('div', { className: 'grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3' },
+              getFilteredArtists().map(artist =>
+                h('div', { key: artist.id, className: 'bg-gray-800 rounded-lg p-3' },
+                  h('img', {
+                    src: artist.images[0]?.url || 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="100" height="100"%3E%3Crect fill="%23374151" width="100" height="100"/%3E%3C/svg%3E',
+                    alt: artist.name,
+                    className: 'w-full aspect-square object-cover rounded mb-2'
+                  }),
+                  h('p', { className: 'text-white font-semibold text-sm mb-1 truncate' }, artist.name),
+                  h('p', { className: 'text-green-400 text-xs mb-2' }, `📁 ${artist.category || 'Unknown'}`),
+                  h('select', {
+                    value: artist.category || '',
+                    onChange: (e) => moveArtist(artist.id, artist.category, e.target.value),
+                    className: 'w-full bg-gray-700 text-white text-xs py-1 px-2 rounded border border-gray-600 outline-none'
+                  }, categoryEntries.map(([cat]) => h('option', { key: cat, value: cat }, cat)))
+                )
+              )
+            )
       ),
       
       // Categories
