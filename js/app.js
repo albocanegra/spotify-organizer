@@ -504,18 +504,28 @@ export function SpotifyOrganizer() {
           isSaving && h('span', { className: 'text-yellow-400 text-sm animate-pulse' }, '💾')
         ),
         h('div', { className: 'flex items-center gap-2' },
-          // Quick actions (always visible)
+          // Jump to category dropdown
+          h('select', {
+            onChange: (e) => {
+              if (e.target.value) {
+                scrollToCategory(e.target.value);
+                e.target.value = '';
+              }
+            },
+            className: 'bg-gray-800 text-white px-3 py-2 rounded-full border border-gray-700 text-sm'
+          },
+            h('option', { value: '' }, '📂 Jump to...'),
+            categoryEntries.map(([cat, artistIds]) => 
+              h('option', { key: cat, value: cat }, `${cat} (${artistIds.length})`)
+            )
+          ),
+          
+          // Add category button
           h('button', {
             onClick: () => setShowNewCategory(!showNewCategory),
             className: 'bg-green-500 hover:bg-green-600 text-black font-semibold py-2 px-4 rounded-full text-sm',
             title: 'New Category'
           }, '➕'),
-          h('button', {
-            onClick: syncWithSpotify,
-            disabled: syncing,
-            className: 'bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-4 rounded-full text-sm disabled:opacity-50',
-            title: 'Sync with Spotify'
-          }, syncing ? '🔄' : '🔄'),
           
           // Menu dropdown
           h('div', { className: 'relative' },
@@ -526,24 +536,6 @@ export function SpotifyOrganizer() {
             showMenu && h('div', { 
               className: 'absolute right-0 top-12 bg-gray-800 border border-gray-700 rounded-lg shadow-xl z-50 min-w-48'
             },
-              // Jump to category
-              h('div', { className: 'p-2 border-b border-gray-700' },
-                h('select', {
-                  onChange: (e) => {
-                    if (e.target.value) {
-                      scrollToCategory(e.target.value);
-                      e.target.value = '';
-                      setShowMenu(false);
-                    }
-                  },
-                  className: 'w-full bg-gray-700 text-white px-3 py-2 rounded text-sm'
-                },
-                  h('option', { value: '' }, '📂 Jump to...'),
-                  categoryEntries.map(([cat, artistIds]) => 
-                    h('option', { key: cat, value: cat }, `${cat} (${artistIds.length})`)
-                  )
-                )
-              ),
               // View options
               h('div', { className: 'p-1 border-b border-gray-700' },
                 h('button', {
@@ -555,8 +547,13 @@ export function SpotifyOrganizer() {
                   className: 'w-full text-left px-3 py-2 text-white hover:bg-gray-700 rounded text-sm'
                 }, '📁 Collapse All')
               ),
-              // Danger zone
+              // Sync & Reset
               h('div', { className: 'p-1 border-b border-gray-700' },
+                h('button', {
+                  onClick: () => { syncWithSpotify(); setShowMenu(false); },
+                  disabled: syncing,
+                  className: 'w-full text-left px-3 py-2 text-blue-400 hover:bg-gray-700 rounded text-sm disabled:opacity-50'
+                }, syncing ? '🔄 Syncing...' : '🔄 Sync with Spotify'),
                 h('button', {
                   onClick: () => { setShowResetConfirm(true); setShowMenu(false); },
                   className: 'w-full text-left px-3 py-2 text-red-400 hover:bg-gray-700 rounded text-sm'
@@ -674,14 +671,7 @@ export function SpotifyOrganizer() {
                     h('div', { className: 'text-lg transition-transform ' + (isCollapsed ? '' : 'rotate-90') }, '▶'),
                     h('div', { className: 'text-2xl' }, categoryName === 'Uncategorized' ? '📥' : '📁'),
                     h('h2', { className: 'text-xl font-bold text-white' }, categoryName),
-                    h('span', { className: 'text-gray-400 text-sm' }, `(${categoryArtists.length})`),
-                    categoryPlaylists[categoryName] && h('a', {
-                      href: `https://open.spotify.com/playlist/${categoryPlaylists[categoryName]}`,
-                      target: '_blank',
-                      rel: 'noopener noreferrer',
-                      className: 'text-green-400 hover:text-green-300 text-xs ml-2',
-                      onClick: (e) => e.stopPropagation()
-                    }, '↗')
+                    h('span', { className: 'text-gray-400 text-sm' }, `(${categoryArtists.length})`)
                   ),
                   categoryName !== 'Uncategorized' && h('button', {
                     onClick: (e) => { e.stopPropagation(); deleteCategory(categoryName); },

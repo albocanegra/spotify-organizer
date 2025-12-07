@@ -11,7 +11,7 @@ export const ALLOWED_USER_IDS = [
   // 'your_spotify_user_id_here'  // Uncomment and add your ID to restrict access
 ];
 
-export const APP_VERSION = 'v4.3.0';
+export const APP_VERSION = 'v4.3.1';
 
 // Playlist naming conventions
 export const CATEGORY_PREFIX = '🎸 ArtistOrganizer/';  // Visual category playlists
