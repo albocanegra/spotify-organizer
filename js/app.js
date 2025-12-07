@@ -86,7 +86,15 @@ export function SpotifyOrganizer() {
 
   const loadData = async (token, uid) => {
     setLoadingMessage('Loading categories...');
-    const loadedCategories = await spotify.loadCategoriesFromSpotify(token, uid);
+    let loadedCategories = await spotify.loadCategoriesFromSpotify(token, uid);
+    
+    // Check if data was corrupted
+    if (loadedCategories._corrupted) {
+      console.log('Data was corrupted, resetting...');
+      setLoadingMessage('Data corrupted, cleaning up...');
+      await spotify.resetAllData(token, uid);
+      loadedCategories = {};
+    }
     
     setLoadingMessage('Loading followed artists...');
     const allArtists = await spotify.getFollowedArtists(token);

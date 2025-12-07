@@ -247,6 +247,8 @@ export async function loadCategoriesFromSpotify(token, userId) {
   
   // Debug logging
   console.log('Loaded JSON string:', jsonString.substring(0, 200) + '...');
+  console.log('Total length:', jsonString.length);
+  console.log('Number of data playlists:', dataPlaylistRefs.length);
   
   if (!jsonString || jsonString.trim() === '') {
     console.log('No data found in playlists');
@@ -257,8 +259,23 @@ export async function loadCategoriesFromSpotify(token, userId) {
     return JSON.parse(jsonString);
   } catch (e) {
     console.error('Failed to parse categories data:', e);
-    console.error('Raw JSON string:', jsonString);
-    return {};
+    
+    // Try to extract valid JSON - find the first complete JSON object
+    const match = jsonString.match(/^\{[\s\S]*?\}(?=\{|$|[^"\]}])/);
+    if (match) {
+      try {
+        console.log('Attempting to parse partial JSON...');
+        const parsed = JSON.parse(match[0]);
+        console.log('Successfully parsed partial data');
+        return parsed;
+      } catch (e2) {
+        console.error('Partial parse also failed');
+      }
+    }
+    
+    // Data is corrupted, return empty to start fresh
+    console.error('Data corrupted, returning empty categories');
+    return { _corrupted: true };
   }
 }
 
@@ -314,4 +331,33 @@ export async function deleteOldPlaylists(token, playlists) {
     await deletePlaylist(token, playlist.id);
     await delay(200);
   }
+}
+
+// Clean up all data playlists (for resetting corrupted data)
+export async function resetAllData(token, userId) {
+  const allPlaylists = await getUserPlaylists(token);
+  
+  // Delete all data playlists
+  const dataPlaylists = allPlaylists.filter(p => 
+    p?.name?.startsWith(DATA_PLAYLIST_PREFIX) && p.owner.id === userId
+  );
+  
+  for (const playlist of dataPlaylists) {
+    console.log('Deleting data playlist:', playlist.name);
+    await deletePlaylist(token, playlist.id);
+    await delay(200);
+  }
+  
+  // Delete all category playlists
+  const categoryPlaylists = allPlaylists.filter(p => 
+    p?.name?.startsWith(CATEGORY_PREFIX) && p.owner.id === userId
+  );
+  
+  for (const playlist of categoryPlaylists) {
+    console.log('Deleting category playlist:', playlist.name);
+    await deletePlaylist(token, playlist.id);
+    await delay(200);
+  }
+  
+  return { deletedData: dataPlaylists.length, deletedCategories: categoryPlaylists.length };
 }
