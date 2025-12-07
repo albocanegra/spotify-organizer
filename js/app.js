@@ -1,7 +1,7 @@
 // Main React Application Component
 
 import { APP_VERSION } from './config.js';
-import { initiateLogin, exchangeCodeForToken, getStoredToken } from './auth.js';
+import { initiateLogin, exchangeCodeForToken, getStoredToken, clearAuth } from './auth.js';
 import * as spotify from './spotify-api.js';
 
 const { useState, useEffect, createElement: h } = React;
@@ -291,6 +291,15 @@ export function SpotifyOrganizer() {
 
   const getArtistById = (id) => artists.find(a => a.id === id);
 
+  const handleLogout = () => {
+    clearAuth();
+    setAccessToken(null);
+    setUserId(null);
+    setArtists([]);
+    setCategories({});
+    setCategoryPlaylists({});
+  };
+
   // ============================================
   // RENDER: Migration Dialog
   // ============================================
@@ -356,11 +365,11 @@ export function SpotifyOrganizer() {
     );
   }
 
-  // Sort categories (Uncategorized always last)
+  // Sort categories (Uncategorized always first)
   const categoryEntries = Object.entries(categories);
   categoryEntries.sort((a, b) => {
-    if (a[0] === 'Uncategorized') return 1;
-    if (b[0] === 'Uncategorized') return -1;
+    if (a[0] === 'Uncategorized') return -1;
+    if (b[0] === 'Uncategorized') return 1;
     return a[0].localeCompare(b[0]);
   });
 
@@ -405,7 +414,11 @@ export function SpotifyOrganizer() {
           h('button', {
             onClick: () => setShowNewCategory(!showNewCategory),
             className: 'bg-green-500 hover:bg-green-600 text-black font-semibold py-2 px-4 rounded-full'
-          }, '➕ New Category')
+          }, '➕ New Category'),
+          h('button', {
+            onClick: handleLogout,
+            className: 'bg-gray-700 hover:bg-gray-600 text-white py-2 px-4 rounded-full text-sm'
+          }, '🚪 Logout')
         )
       ),
       
