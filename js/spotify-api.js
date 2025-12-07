@@ -1,6 +1,10 @@
 // Spotify API wrapper functions
 
-const PLAYLIST_PREFIX = '🎸 ';
+import { 
+  CATEGORY_PREFIX, 
+  DATA_PLAYLIST_PREFIX, 
+  DESCRIPTION_MAX_LENGTH 
+} from './config.js';
 
 // Simple delay helper for rate limiting
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -11,7 +15,6 @@ async function rateLimitedFetch(url, options, retries = 3) {
     const response = await fetch(url, options);
     
     if (response.status === 429) {
-      // Get retry-after header or default to 1 second
       const retryAfter = parseInt(response.headers.get('Retry-After') || '1', 10);
       console.log(`Rate limited, waiting ${retryAfter}s...`);
       await delay(retryAfter * 1000);
@@ -37,14 +40,16 @@ async function fetchAllPages(url, token, getItems = data => data.items) {
     results.push(...(getItems(data) || []));
     nextUrl = data.next;
     
-    // Small delay between pages to avoid rate limits
     if (nextUrl) await delay(100);
   }
   
   return results;
 }
 
-// User profile
+// ============================================
+// USER & ARTISTS
+// ============================================
+
 export async function getCurrentUser(token) {
   const response = await rateLimitedFetch('https://api.spotify.com/v1/me', {
     headers: { 'Authorization': `Bearer ${token}` }
@@ -52,7 +57,6 @@ export async function getCurrentUser(token) {
   return response.json();
 }
 
-// Followed artists
 export async function getFollowedArtists(token) {
   return fetchAllPages(
     'https://api.spotify.com/v1/me/following?type=artist&limit=50',
@@ -61,17 +65,10 @@ export async function getFollowedArtists(token) {
   );
 }
 
-// Get artist's top track
-export async function getArtistTopTrack(token, artistId) {
-  const response = await rateLimitedFetch(
-    `https://api.spotify.com/v1/artists/${artistId}/top-tracks?market=US`,
-    { headers: { 'Authorization': `Bearer ${token}` } }
-  );
-  const data = await response.json();
-  return data.tracks?.[0]?.uri || null;
-}
+// ============================================
+// PLAYLIST OPERATIONS
+// ============================================
 
-// Playlist operations
 export async function getUserPlaylists(token) {
   return fetchAllPages(
     'https://api.spotify.com/v1/me/playlists?limit=50',
@@ -79,157 +76,190 @@ export async function getUserPlaylists(token) {
   );
 }
 
-export async function getPlaylistTracks(token, playlistId) {
-  if (!playlistId) {
-    console.warn('getPlaylistTracks called with undefined playlistId');
-    return [];
-  }
-  
-  return fetchAllPages(
-    `https://api.spotify.com/v1/playlists/${playlistId}/tracks?limit=100`,
-    token
-  );
-}
-
-export async function createPlaylist(token, userId, name, description) {
+async function createPlaylist(token, userId, name, description, isPublic = false) {
   const response = await rateLimitedFetch(`https://api.spotify.com/v1/users/${userId}/playlists`, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${token}`,
       'Content-Type': 'application/json'
     },
-    body: JSON.stringify({
-      name: `${PLAYLIST_PREFIX}${name}`,
-      description,
-      public: false
-    })
+    body: JSON.stringify({ name, description, public: isPublic })
   });
   return response.json();
 }
 
-export async function deletePlaylist(token, playlistId) {
-  if (!playlistId) {
-    console.warn('deletePlaylist called with undefined playlistId');
-    return;
-  }
-  
+async function updatePlaylistDescription(token, playlistId, description) {
+  return rateLimitedFetch(`https://api.spotify.com/v1/playlists/${playlistId}`, {
+    method: 'PUT',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ description })
+  });
+}
+
+async function deletePlaylist(token, playlistId) {
   return rateLimitedFetch(`https://api.spotify.com/v1/playlists/${playlistId}/followers`, {
     method: 'DELETE',
     headers: { 'Authorization': `Bearer ${token}` }
   });
 }
 
-export async function addTracksToPlaylist(token, playlistId, trackUris) {
-  if (!playlistId) {
-    console.warn('addTracksToPlaylist called with undefined playlistId');
-    return;
-  }
-  if (!trackUris.length) return;
-  
-  // Spotify allows max 100 tracks per request
-  for (let i = 0; i < trackUris.length; i += 100) {
-    const batch = trackUris.slice(i, i + 100);
-    await rateLimitedFetch(`https://api.spotify.com/v1/playlists/${playlistId}/tracks`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ uris: batch })
-    });
-    
-    // Delay between batches
-    if (i + 100 < trackUris.length) await delay(200);
-  }
+// ============================================
+// CATEGORY PLAYLISTS (Visual markers - empty)
+// ============================================
+
+export async function createCategoryPlaylist(token, userId, categoryName) {
+  const name = `${CATEGORY_PREFIX}${categoryName}`;
+  const description = `Artists categorized as "${categoryName}" - managed by Artist Organizer`;
+  const playlist = await createPlaylist(token, userId, name, description, false);
+  return playlist;
 }
 
-export async function removeTracksFromPlaylist(token, playlistId, trackUris) {
-  if (!playlistId) {
-    console.warn('removeTracksFromPlaylist called with undefined playlistId');
-    return;
-  }
-  if (!trackUris.length) return;
-  
-  const tracks = trackUris.map(uri => ({ uri }));
-  return rateLimitedFetch(`https://api.spotify.com/v1/playlists/${playlistId}/tracks`, {
-    method: 'DELETE',
-    headers: {
-      'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ tracks })
-  });
+export async function deleteCategoryPlaylist(token, playlistId) {
+  if (!playlistId) return;
+  return deletePlaylist(token, playlistId);
 }
 
-// Category-specific operations
-export async function loadCategoriesFromPlaylists(token, userId) {
+export async function getCategoryPlaylists(token, userId) {
   const allPlaylists = await getUserPlaylists(token);
   
-  // Filter to only our category playlists
-  const categoryPlaylists = allPlaylists.filter(p => 
-    p?.name?.startsWith(PLAYLIST_PREFIX) && p.owner.id === userId
+  const categoryPlaylists = {};
+  allPlaylists
+    .filter(p => p?.name?.startsWith(CATEGORY_PREFIX) && p.owner.id === userId)
+    .forEach(p => {
+      const categoryName = p.name.substring(CATEGORY_PREFIX.length);
+      categoryPlaylists[categoryName] = p.id;
+    });
+  
+  return categoryPlaylists;
+}
+
+// ============================================
+// DATA STORAGE (Chunked JSON in descriptions)
+// ============================================
+
+function chunkData(jsonString, maxLength) {
+  const chunks = [];
+  for (let i = 0; i < jsonString.length; i += maxLength) {
+    chunks.push(jsonString.substring(i, i + maxLength));
+  }
+  return chunks;
+}
+
+function getDataPlaylistName(index) {
+  return index === 0 ? DATA_PLAYLIST_PREFIX : `${DATA_PLAYLIST_PREFIX}_${index + 1}`;
+}
+
+export async function saveCategoriesToSpotify(token, userId, categories) {
+  const jsonString = JSON.stringify(categories);
+  const chunks = chunkData(jsonString, DESCRIPTION_MAX_LENGTH);
+  
+  // Get existing data playlists
+  const allPlaylists = await getUserPlaylists(token);
+  const dataPlaylists = allPlaylists
+    .filter(p => p?.name?.startsWith(DATA_PLAYLIST_PREFIX) && p.owner.id === userId)
+    .sort((a, b) => a.name.localeCompare(b.name));
+  
+  // Update or create playlists for each chunk
+  for (let i = 0; i < chunks.length; i++) {
+    const playlistName = getDataPlaylistName(i);
+    const existingPlaylist = dataPlaylists.find(p => p.name === playlistName);
+    
+    if (existingPlaylist) {
+      await updatePlaylistDescription(token, existingPlaylist.id, chunks[i]);
+    } else {
+      await createPlaylist(token, userId, playlistName, chunks[i], false);
+    }
+    
+    await delay(100);
+  }
+  
+  // Delete any extra data playlists that are no longer needed
+  for (let i = chunks.length; i < dataPlaylists.length; i++) {
+    const playlistName = getDataPlaylistName(i);
+    const playlistToDelete = dataPlaylists.find(p => p.name === playlistName);
+    if (playlistToDelete) {
+      await deletePlaylist(token, playlistToDelete.id);
+      await delay(100);
+    }
+  }
+}
+
+export async function loadCategoriesFromSpotify(token, userId) {
+  const allPlaylists = await getUserPlaylists(token);
+  
+  // Find and sort data playlists
+  const dataPlaylists = allPlaylists
+    .filter(p => p?.name?.startsWith(DATA_PLAYLIST_PREFIX) && p.owner.id === userId)
+    .sort((a, b) => a.name.localeCompare(b.name));
+  
+  if (dataPlaylists.length === 0) {
+    return {};
+  }
+  
+  // Reconstruct JSON from chunks
+  const jsonString = dataPlaylists.map(p => p.description || '').join('');
+  
+  try {
+    return JSON.parse(jsonString);
+  } catch (e) {
+    console.error('Failed to parse categories data:', e);
+    return {};
+  }
+}
+
+// ============================================
+// MIGRATION: Clean up old track-based playlists
+// ============================================
+
+export async function migrateFromOldFormat(token, userId) {
+  const allPlaylists = await getUserPlaylists(token);
+  const OLD_PREFIX = '🎸 ';
+  
+  // Find old-format playlists (🎸 but not 🎸 ArtistOrganizer/)
+  const oldPlaylists = allPlaylists.filter(p => 
+    p?.name?.startsWith(OLD_PREFIX) && 
+    !p.name.startsWith(CATEGORY_PREFIX) &&
+    p.owner.id === userId
   );
   
-  if (categoryPlaylists.length === 0) {
-    return { categories: {}, playlistIds: {} };
+  if (oldPlaylists.length === 0) {
+    return null; // No migration needed
   }
-
+  
+  // Extract category data from old playlists by reading their tracks
   const categories = {};
-  const playlistIds = {};
-
-  // Process playlists SEQUENTIALLY to avoid rate limits
-  for (const playlist of categoryPlaylists) {
-    const categoryName = playlist.name.substring(PLAYLIST_PREFIX.length);
-    const tracks = await getPlaylistTracks(token, playlist.id);
+  
+  for (const playlist of oldPlaylists) {
+    const categoryName = playlist.name.substring(OLD_PREFIX.length);
     
-    // Extract unique artist IDs from tracks
+    // Get tracks and extract artist IDs
+    const tracks = await fetchAllPages(
+      `https://api.spotify.com/v1/playlists/${playlist.id}/tracks?limit=100`,
+      token
+    );
+    
     const artistIds = [...new Set(
       tracks
         .filter(t => t.track?.artists?.[0])
         .map(t => t.track.artists[0].id)
     )];
     
-    categories[categoryName] = artistIds;
-    playlistIds[categoryName] = playlist.id;
+    if (artistIds.length > 0) {
+      categories[categoryName] = artistIds;
+    }
     
-    // Small delay between playlists
     await delay(100);
   }
   
-  return { categories, playlistIds };
+  return { categories, oldPlaylists };
 }
 
-export async function addArtistsToPlaylist(token, playlistId, artists) {
-  if (!playlistId) {
-    console.warn('addArtistsToPlaylist called with undefined playlistId');
-    return;
+export async function deleteOldPlaylists(token, playlists) {
+  for (const playlist of playlists) {
+    await deletePlaylist(token, playlist.id);
+    await delay(200);
   }
-  if (!artists.length) return;
-  
-  // Fetch top tracks SEQUENTIALLY to avoid rate limits
-  const trackUris = [];
-  for (const artist of artists) {
-    const uri = await getArtistTopTrack(token, artist.id);
-    if (uri) trackUris.push(uri);
-    await delay(50); // Small delay between artist lookups
-  }
-  
-  await addTracksToPlaylist(token, playlistId, trackUris);
 }
-
-export async function removeArtistFromPlaylist(token, playlistId, artistId) {
-  if (!playlistId) {
-    console.warn('removeArtistFromPlaylist called with undefined playlistId');
-    return;
-  }
-  
-  const tracks = await getPlaylistTracks(token, playlistId);
-  
-  const tracksToRemove = tracks
-    .filter(t => t.track?.artists?.[0]?.id === artistId)
-    .map(t => t.track.uri);
-  
-  await removeTracksFromPlaylist(token, playlistId, tracksToRemove);
-}
-
-export { PLAYLIST_PREFIX };

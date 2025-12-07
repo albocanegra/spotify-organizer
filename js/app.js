@@ -13,10 +13,13 @@ export function SpotifyOrganizer() {
   const [categories, setCategories] = useState({});
   const [categoryPlaylists, setCategoryPlaylists] = useState({});
   const [loading, setLoading] = useState(false);
+  const [loadingMessage, setLoadingMessage] = useState('');
   const [newCategoryName, setNewCategoryName] = useState('');
   const [showNewCategory, setShowNewCategory] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [statusMessage, setStatusMessage] = useState('');
+  const [showMigration, setShowMigration] = useState(false);
+  const [migrationData, setMigrationData] = useState(null);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -35,11 +38,14 @@ export function SpotifyOrganizer() {
 
   const showStatus = (message, duration = 3000) => {
     setStatusMessage(message);
-    setTimeout(() => setStatusMessage(''), duration);
+    if (duration > 0) {
+      setTimeout(() => setStatusMessage(''), duration);
+    }
   };
 
   const handleOAuthCallback = async (code) => {
     setLoading(true);
+    setLoadingMessage('Authenticating...');
     try {
       const token = await exchangeCodeForToken(code);
       setAccessToken(token);
@@ -54,48 +60,127 @@ export function SpotifyOrganizer() {
   const initializeApp = async (token) => {
     setLoading(true);
     try {
+      setLoadingMessage('Getting user info...');
       const userData = await spotify.getCurrentUser(token);
       setUserId(userData.id);
       
-      // Load categories and artists
-      const { categories: loadedCategories, playlistIds } = await spotify.loadCategoriesFromPlaylists(token, userData.id);
-      const allArtists = await spotify.getFollowedArtists(token);
-      setArtists(allArtists);
+      // Check for old format and offer migration
+      setLoadingMessage('Checking for existing data...');
+      const migration = await spotify.migrateFromOldFormat(token, userData.id);
       
-      // Find uncategorized artists
-      const categorizedIds = new Set(Object.values(loadedCategories).flat());
-      const uncategorizedArtists = allArtists.filter(a => !categorizedIds.has(a.id));
-      
-      if (uncategorizedArtists.length > 0) {
-        const updatedPlaylists = { ...playlistIds };
-        
-        if (!updatedPlaylists['Uncategorized']) {
-          const playlist = await spotify.createPlaylist(
-            token, 
-            userData.id, 
-            'Uncategorized',
-            'Artists not yet categorized - managed by Artist Organizer'
-          );
-          updatedPlaylists['Uncategorized'] = playlist.id;
-        }
-        
-        await spotify.addArtistsToPlaylist(token, updatedPlaylists['Uncategorized'], uncategorizedArtists);
-        
-        loadedCategories['Uncategorized'] = [
-          ...(loadedCategories['Uncategorized'] || []),
-          ...uncategorizedArtists.map(a => a.id)
-        ];
-        
-        setCategoryPlaylists(updatedPlaylists);
-      } else {
-        setCategoryPlaylists(playlistIds);
+      if (migration) {
+        setMigrationData(migration);
+        setShowMigration(true);
+        setLoading(false);
+        return;
       }
       
-      setCategories(loadedCategories);
+      // Load data normally
+      await loadData(token, userData.id);
     } catch (err) {
       console.error('Init error:', err);
       showStatus('✗ Failed to load data');
     }
+    setLoading(false);
+  };
+
+  const loadData = async (token, uid) => {
+    setLoadingMessage('Loading categories...');
+    const loadedCategories = await spotify.loadCategoriesFromSpotify(token, uid);
+    
+    setLoadingMessage('Loading followed artists...');
+    const allArtists = await spotify.getFollowedArtists(token);
+    setArtists(allArtists);
+    
+    setLoadingMessage('Loading category playlists...');
+    const playlists = await spotify.getCategoryPlaylists(token, uid);
+    setCategoryPlaylists(playlists);
+    
+    // Find uncategorized artists
+    const categorizedIds = new Set(Object.values(loadedCategories).flat());
+    const uncategorizedArtists = allArtists.filter(a => !categorizedIds.has(a.id));
+    
+    // Ensure Uncategorized category exists
+    if (!loadedCategories['Uncategorized']) {
+      loadedCategories['Uncategorized'] = [];
+    }
+    
+    // Add new uncategorized artists
+    if (uncategorizedArtists.length > 0) {
+      loadedCategories['Uncategorized'] = [
+        ...loadedCategories['Uncategorized'],
+        ...uncategorizedArtists.map(a => a.id)
+      ];
+      
+      // Save updated categories
+      setLoadingMessage('Saving changes...');
+      await spotify.saveCategoriesToSpotify(token, uid, loadedCategories);
+    }
+    
+    // Ensure Uncategorized playlist exists
+    if (!playlists['Uncategorized']) {
+      setLoadingMessage('Creating Uncategorized playlist...');
+      const playlist = await spotify.createCategoryPlaylist(token, uid, 'Uncategorized');
+      playlists['Uncategorized'] = playlist.id;
+      setCategoryPlaylists(playlists);
+    }
+    
+    // Remove unfollowed artists from categories
+    const currentArtistIds = new Set(allArtists.map(a => a.id));
+    let hasChanges = false;
+    Object.keys(loadedCategories).forEach(cat => {
+      const before = loadedCategories[cat].length;
+      loadedCategories[cat] = loadedCategories[cat].filter(id => currentArtistIds.has(id));
+      if (loadedCategories[cat].length !== before) hasChanges = true;
+    });
+    
+    if (hasChanges) {
+      await spotify.saveCategoriesToSpotify(token, uid, loadedCategories);
+    }
+    
+    setCategories(loadedCategories);
+  };
+
+  const handleMigration = async (shouldMigrate) => {
+    setShowMigration(false);
+    setLoading(true);
+    
+    try {
+      if (shouldMigrate && migrationData) {
+        setLoadingMessage('Migrating data to new format...');
+        
+        // Save categories in new format
+        await spotify.saveCategoriesToSpotify(accessToken, userId, migrationData.categories);
+        
+        // Create visual category playlists
+        const playlists = {};
+        for (const categoryName of Object.keys(migrationData.categories)) {
+          setLoadingMessage(`Creating playlist: ${categoryName}...`);
+          const playlist = await spotify.createCategoryPlaylist(accessToken, userId, categoryName);
+          playlists[categoryName] = playlist.id;
+        }
+        setCategoryPlaylists(playlists);
+        setCategories(migrationData.categories);
+        
+        // Delete old playlists
+        setLoadingMessage('Cleaning up old playlists...');
+        await spotify.deleteOldPlaylists(accessToken, migrationData.oldPlaylists);
+        
+        showStatus('✓ Migration complete!');
+        
+        // Now load the rest
+        setLoadingMessage('Loading artists...');
+        const allArtists = await spotify.getFollowedArtists(accessToken);
+        setArtists(allArtists);
+      } else {
+        // User chose not to migrate, start fresh
+        await loadData(accessToken, userId);
+      }
+    } catch (err) {
+      console.error('Migration error:', err);
+      showStatus('✗ Migration failed');
+    }
+    
     setLoading(false);
   };
 
@@ -106,14 +191,14 @@ export function SpotifyOrganizer() {
     showStatus('Creating category...');
     
     try {
-      const playlist = await spotify.createPlaylist(
-        accessToken,
-        userId,
-        categoryName,
-        `Artists categorized as "${categoryName}" - managed by Artist Organizer`
-      );
+      // Create visual playlist
+      const playlist = await spotify.createCategoryPlaylist(accessToken, userId, categoryName);
       
-      setCategories(prev => ({ ...prev, [categoryName]: [] }));
+      // Update categories
+      const updatedCategories = { ...categories, [categoryName]: [] };
+      await spotify.saveCategoriesToSpotify(accessToken, userId, updatedCategories);
+      
+      setCategories(updatedCategories);
       setCategoryPlaylists(prev => ({ ...prev, [categoryName]: playlist.id }));
       setNewCategoryName('');
       setShowNewCategory(false);
@@ -128,31 +213,28 @@ export function SpotifyOrganizer() {
     if (categoryName === 'Uncategorized') return;
     
     const playlistId = categoryPlaylists[categoryName];
-    const uncategorizedPlaylistId = categoryPlaylists['Uncategorized'];
     const artistsToMove = categories[categoryName] || [];
-    
-    if (!playlistId) {
-      showStatus('✗ Category playlist not found');
-      return;
-    }
     
     showStatus('Deleting category...');
     
     try {
-      if (artistsToMove.length > 0 && uncategorizedPlaylistId) {
-        const artistObjects = artistsToMove.map(id => artists.find(a => a.id === id)).filter(Boolean);
-        await spotify.addArtistsToPlaylist(accessToken, uncategorizedPlaylistId, artistObjects);
+      // Move artists to Uncategorized
+      const updatedCategories = { ...categories };
+      delete updatedCategories[categoryName];
+      updatedCategories['Uncategorized'] = [
+        ...(updatedCategories['Uncategorized'] || []),
+        ...artistsToMove
+      ];
+      
+      // Save updated categories
+      await spotify.saveCategoriesToSpotify(accessToken, userId, updatedCategories);
+      
+      // Delete visual playlist
+      if (playlistId) {
+        await spotify.deleteCategoryPlaylist(accessToken, playlistId);
       }
       
-      await spotify.deletePlaylist(accessToken, playlistId);
-      
-      setCategories(prev => {
-        const { [categoryName]: deleted, ...rest } = prev;
-        return {
-          ...rest,
-          'Uncategorized': [...(rest['Uncategorized'] || []), ...artistsToMove]
-        };
-      });
+      setCategories(updatedCategories);
       setCategoryPlaylists(prev => {
         const { [categoryName]: deleted, ...rest } = prev;
         return rest;
@@ -167,29 +249,16 @@ export function SpotifyOrganizer() {
   const moveArtist = async (artistId, fromCategory, toCategory) => {
     if (fromCategory === toCategory) return;
     
-    const artist = artists.find(a => a.id === artistId);
-    if (!artist) return;
-    
-    const fromPlaylistId = categoryPlaylists[fromCategory];
-    const toPlaylistId = categoryPlaylists[toCategory];
-    
-    if (!fromPlaylistId || !toPlaylistId) {
-      showStatus('✗ Playlist not found');
-      return;
-    }
-
     showStatus('Moving artist...', 1500);
 
     try {
-      await spotify.removeArtistFromPlaylist(accessToken, fromPlaylistId, artistId);
-      await spotify.addArtistsToPlaylist(accessToken, toPlaylistId, [artist]);
+      const updatedCategories = { ...categories };
+      updatedCategories[fromCategory] = updatedCategories[fromCategory].filter(id => id !== artistId);
+      updatedCategories[toCategory] = [...(updatedCategories[toCategory] || []), artistId];
       
-      setCategories(prev => {
-        const updated = { ...prev };
-        updated[fromCategory] = updated[fromCategory].filter(id => id !== artistId);
-        updated[toCategory] = [...(updated[toCategory] || []), artistId];
-        return updated;
-      });
+      await spotify.saveCategoriesToSpotify(accessToken, userId, updatedCategories);
+      
+      setCategories(updatedCategories);
       showStatus('✓ Artist moved', 1500);
     } catch (err) {
       console.error('Error moving artist:', err);
@@ -201,50 +270,10 @@ export function SpotifyOrganizer() {
     if (!accessToken || !userId) return;
     
     setSyncing(true);
-    showStatus('🔄 Syncing with Spotify...');
+    showStatus('🔄 Syncing...', 0);
     
     try {
-      const { categories: loadedCategories, playlistIds } = await spotify.loadCategoriesFromPlaylists(accessToken, userId);
-      const allArtists = await spotify.getFollowedArtists(accessToken);
-      setArtists(allArtists);
-      
-      // Find uncategorized artists
-      const categorizedIds = new Set(Object.values(loadedCategories).flat());
-      const currentArtistIds = new Set(allArtists.map(a => a.id));
-      
-      // Remove unfollowed artists from categories
-      Object.keys(loadedCategories).forEach(cat => {
-        loadedCategories[cat] = loadedCategories[cat].filter(id => currentArtistIds.has(id));
-      });
-      
-      const uncategorizedArtists = allArtists.filter(a => !categorizedIds.has(a.id));
-      
-      if (uncategorizedArtists.length > 0) {
-        const updatedPlaylists = { ...playlistIds };
-        
-        if (!updatedPlaylists['Uncategorized']) {
-          const playlist = await spotify.createPlaylist(
-            accessToken,
-            userId,
-            'Uncategorized',
-            'Artists not yet categorized - managed by Artist Organizer'
-          );
-          updatedPlaylists['Uncategorized'] = playlist.id;
-        }
-        
-        await spotify.addArtistsToPlaylist(accessToken, updatedPlaylists['Uncategorized'], uncategorizedArtists);
-        
-        loadedCategories['Uncategorized'] = [
-          ...(loadedCategories['Uncategorized'] || []),
-          ...uncategorizedArtists.map(a => a.id)
-        ];
-        
-        setCategoryPlaylists(updatedPlaylists);
-      } else {
-        setCategoryPlaylists(playlistIds);
-      }
-      
-      setCategories(loadedCategories);
+      await loadData(accessToken, userId);
       showStatus('✓ Sync complete!');
     } catch (err) {
       console.error('Sync error:', err);
@@ -262,7 +291,37 @@ export function SpotifyOrganizer() {
 
   const getArtistById = (id) => artists.find(a => a.id === id);
 
-  // Render: Login screen
+  // ============================================
+  // RENDER: Migration Dialog
+  // ============================================
+  if (showMigration) {
+    return h('div', { className: 'min-h-screen bg-gradient-to-br from-green-900 via-black to-black flex items-center justify-center p-4' },
+      h('div', { className: 'bg-gray-900 rounded-lg p-8 max-w-lg w-full text-center shadow-2xl' },
+        h('div', { className: 'text-6xl mb-4' }, '🔄'),
+        h('h1', { className: 'text-2xl font-bold text-white mb-4' }, 'Migration Required'),
+        h('p', { className: 'text-gray-300 mb-4' }, 
+          `Found ${migrationData?.oldPlaylists?.length || 0} old category playlists with ${Object.values(migrationData?.categories || {}).flat().length} artists.`
+        ),
+        h('p', { className: 'text-gray-400 mb-6 text-sm' }, 
+          'The new version stores data more efficiently. Would you like to migrate your existing categories?'
+        ),
+        h('div', { className: 'flex gap-4 justify-center' },
+          h('button', {
+            onClick: () => handleMigration(true),
+            className: 'bg-green-500 hover:bg-green-600 text-black font-semibold py-2 px-6 rounded-full'
+          }, '✓ Migrate'),
+          h('button', {
+            onClick: () => handleMigration(false),
+            className: 'bg-gray-700 hover:bg-gray-600 text-white py-2 px-6 rounded-full'
+          }, 'Start Fresh')
+        )
+      )
+    );
+  }
+
+  // ============================================
+  // RENDER: Login Screen
+  // ============================================
   if (!accessToken) {
     return h('div', { className: 'min-h-screen bg-gradient-to-br from-green-900 via-black to-black flex items-center justify-center p-4' },
       h('div', { className: 'bg-gray-900 rounded-lg p-8 max-w-md w-full text-center shadow-2xl' },
@@ -271,9 +330,9 @@ export function SpotifyOrganizer() {
         h('p', { className: 'text-gray-400 mb-6' }, 'Organize your followed artists into custom categories'),
         h('div', { className: 'bg-gray-800 border border-gray-700 rounded p-4 mb-6 text-left text-sm' },
           h('p', { className: 'text-gray-300 mb-2' }, 'Connect your Spotify account to start organizing your followed artists into custom categories.'),
-          h('p', { className: 'text-green-400 text-xs font-semibold mb-2' }, '✓ Categories saved as playlists in your Spotify'),
-          h('p', { className: 'text-green-400 text-xs font-semibold mb-2' }, '✓ Syncs across all your devices'),
-          h('p', { className: 'text-gray-400 text-xs mb-2' }, 'Each category becomes a playlist with tracks from your categorized artists.'),
+          h('p', { className: 'text-green-400 text-xs font-semibold mb-2' }, '✓ Categories stored in Spotify (syncs everywhere)'),
+          h('p', { className: 'text-green-400 text-xs font-semibold mb-2' }, '✓ Clean folder structure in your playlists'),
+          h('p', { className: 'text-gray-400 text-xs mb-2' }, 'Your data is stored privately in hidden playlists.'),
           h('p', { className: 'text-gray-500 text-xs text-right' }, APP_VERSION)
         ),
         h('button', {
@@ -284,12 +343,15 @@ export function SpotifyOrganizer() {
     );
   }
 
-  // Render: Loading screen
+  // ============================================
+  // RENDER: Loading Screen
+  // ============================================
   if (loading) {
     return h('div', { className: 'min-h-screen bg-gradient-to-br from-green-900 via-black to-black flex items-center justify-center' },
       h('div', { className: 'text-center' },
         h('div', { className: 'text-6xl mb-4 animate-pulse' }, '🎸'),
-        h('p', { className: 'text-white' }, 'Loading your artists...')
+        h('p', { className: 'text-white mb-2' }, loadingMessage || 'Loading...'),
+        h('p', { className: 'text-gray-500 text-sm' }, 'This may take a moment')
       )
     );
   }
@@ -302,7 +364,9 @@ export function SpotifyOrganizer() {
     return a[0].localeCompare(b[0]);
   });
 
-  // Render: Main app
+  // ============================================
+  // RENDER: Main App
+  // ============================================
   return h('div', { className: 'min-h-screen bg-gradient-to-br from-green-900 via-black to-black p-4' },
     h('div', { className: 'max-w-6xl mx-auto' },
       // Status message toast
@@ -392,7 +456,7 @@ export function SpotifyOrganizer() {
                       target: '_blank',
                       rel: 'noopener noreferrer',
                       className: 'text-green-400 hover:text-green-300 text-xs ml-2'
-                    }, '↗ Open Playlist')
+                    }, '↗ Playlist')
                   ),
                   categoryName !== 'Uncategorized' && h('button', {
                     onClick: () => deleteCategory(categoryName),
@@ -430,4 +494,3 @@ export function SpotifyOrganizer() {
     )
   );
 }
-
