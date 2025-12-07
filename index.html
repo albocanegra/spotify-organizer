@@ -17,11 +17,14 @@
   <script>
     const { useState, useEffect, createElement: h } = React;
 
-    // PKCE helper functions
     function generateRandomString(length) {
       const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
       const values = crypto.getRandomValues(new Uint8Array(length));
-      return values.reduce(function(acc, x) { return acc + possible[x % possible.length]; }, "");
+      let result = '';
+      for (let i = 0; i < length; i++) {
+        result += possible[values[i] % possible.length];
+      }
+      return result;
     }
 
     function sha256(plain) {
@@ -39,19 +42,22 @@
 
     const SpotifyOrganizer = () => {
       const [accessToken, setAccessToken] = useState(null);
+      const [userId, setUserId] = useState(null);
       const [artists, setArtists] = useState([]);
       const [categories, setCategories] = useState({ 'Uncategorized': [] });
       const [loading, setLoading] = useState(false);
       const [newCategoryName, setNewCategoryName] = useState('');
       const [showNewCategory, setShowNewCategory] = useState(false);
       const [syncing, setSyncing] = useState(false);
+      const [statusMessage, setStatusMessage] = useState('');
 
       const CLIENT_ID = 'e21bf88870a94703bc0cdcf317075a5e';
       const REDIRECT_URI = 'https://albocanegra.github.io/spotify-organizer';
-      const SCOPES = 'user-follow-read';
+      const SCOPES = 'user-follow-read playlist-read-private playlist-modify-private playlist-modify-public';
+      
+      const CATEGORY_PREFIX = '__ARTIST_CATEGORY__';
 
       useEffect(() => {
-        // Check if we're returning from Spotify auth
         const params = new URLSearchParams(window.location.search);
         const code = params.get('code');
         
@@ -59,25 +65,24 @@
           exchangeCodeForToken(code);
         }
 
-        // Load saved categories
-        const saved = localStorage.getItem('spotifyCategories');
-        if (saved) setCategories(JSON.parse(saved));
-
-        // Check if we have a valid token
         const token = localStorage.getItem('spotify_access_token');
         const expiry = localStorage.getItem('spotify_token_expiry');
         
         if (token && expiry && Date.now() < parseInt(expiry)) {
           setAccessToken(token);
-          fetchFollowedArtists(token);
+          initializeApp(token);
         }
       }, []);
 
-      const handleLogin = function() {
-        const codeVerifier = generateRandomString(64);
-        sha256(codeVerifier).then(function(hashed) {
-          const codeChallenge = base64encode(hashed);
+      const showStatus = (message, duration = 3000) => {
+        setStatusMessage(message);
+        setTimeout(() => setStatusMessage(''), duration);
+      };
 
+      const handleLogin = () => {
+        const codeVerifier = generateRandomString(64);
+        sha256(codeVerifier).then((hashed) => {
+          const codeChallenge = base64encode(hashed);
           localStorage.setItem('code_verifier', codeVerifier);
 
           const authUrl = new URL('https://accounts.spotify.com/authorize');
@@ -95,15 +100,13 @@
         });
       };
 
-      const exchangeCodeForToken = function(code) {
+      const exchangeCodeForToken = (code) => {
         setLoading(true);
         const codeVerifier = localStorage.getItem('code_verifier');
 
         fetch('https://accounts.spotify.com/api/token', {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-          },
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: new URLSearchParams({
             client_id: CLIENT_ID,
             grant_type: 'authorization_code',
@@ -112,8 +115,8 @@
             code_verifier: codeVerifier,
           }),
         })
-        .then(function(response) { return response.json(); })
-        .then(function(data) {
+        .then(res => res.json())
+        .then(data => {
           if (data.access_token) {
             const expiryTime = Date.now() + (data.expires_in * 1000);
             localStorage.setItem('spotify_access_token', data.access_token);
@@ -124,64 +127,215 @@
             
             setAccessToken(data.access_token);
             window.history.replaceState({}, document.title, window.location.pathname);
-            fetchFollowedArtists(data.access_token);
+            initializeApp(data.access_token);
           }
         })
-        .catch(function(error) {
-          console.error('Error exchanging code for token:', error);
+        .catch(err => {
+          console.error('Error:', err);
           setLoading(false);
         });
       };
 
-      const fetchFollowedArtists = function(token) {
+      const initializeApp = (token) => {
         setLoading(true);
         
-        function fetchPage(url, accumulated) {
-          return fetch(url, {
-            headers: { 'Authorization': 'Bearer ' + token }
-          })
-          .then(function(response) {
-            if (!response.ok) {
-              throw new Error('Failed to fetch artists');
+        fetch('https://api.spotify.com/v1/me', {
+          headers: { 'Authorization': `Bearer ${token}` }
+        })
+        .then(res => res.json())
+        .then(userData => {
+          setUserId(userData.id);
+          return Promise.all([
+            fetchFollowedArtists(token),
+            loadCategoriesFromSpotify(token, userData.id)
+          ]);
+        })
+        .then(() => {
+          setLoading(false);
+        })
+        .catch(err => {
+          console.error('Error:', err);
+          setLoading(false);
+        });
+      };
+
+      const loadCategoriesFromSpotify = (token, uid) => {
+        return fetch('https://api.spotify.com/v1/me/playlists?limit=50', {
+          headers: { 'Authorization': `Bearer ${token}` }
+        })
+        .then(res => res.json())
+        .then(data => {
+          const categoryPlaylists = data.items.filter(p => 
+            p.name.startsWith(CATEGORY_PREFIX) && p.owner.id === uid
+          );
+          
+          if (categoryPlaylists.length === 0) {
+            return { 'Uncategorized': [] };
+          }
+
+          const loadedCategories = {};
+          
+          return Promise.all(
+            categoryPlaylists.map(playlist => {
+              const categoryName = playlist.name.replace(CATEGORY_PREFIX, '');
+              
+              return fetch(playlist.tracks.href, {
+                headers: { 'Authorization': `Bearer ${token}` }
+              })
+              .then(res => res.json())
+              .then(tracksData => {
+                const artistIds = tracksData.items
+                  .map(item => item.track?.artists?.[0]?.id)
+                  .filter(Boolean);
+                loadedCategories[categoryName] = artistIds;
+              });
+            })
+          ).then(() => {
+            if (!loadedCategories['Uncategorized']) {
+              loadedCategories['Uncategorized'] = [];
             }
-            return response.json();
-          })
-          .then(function(data) {
-            const allArtists = accumulated.concat(data.artists.items);
-            
-            if (data.artists.next) {
-              return fetchPage(data.artists.next, allArtists);
-            } else {
-              return allArtists;
-            }
+            setCategories(loadedCategories);
+            return loadedCategories;
           });
-        }
+        });
+      };
+
+      const saveCategoryToSpotify = (token, uid, categoryName, artistIds) => {
+        const playlistName = CATEGORY_PREFIX + categoryName;
         
-        fetchPage('https://api.spotify.com/v1/me/following?type=artist&limit=50', [])
-          .then(function(allArtists) {
+        return fetch('https://api.spotify.com/v1/me/playlists?limit=50', {
+          headers: { 'Authorization': `Bearer ${token}` }
+        })
+        .then(res => res.json())
+        .then(data => {
+          const existingPlaylist = data.items.find(p => 
+            p.name === playlistName && p.owner.id === uid
+          );
+          
+          if (existingPlaylist) {
+            return fetch(`https://api.spotify.com/v1/playlists/${existingPlaylist.id}/tracks`, {
+              method: 'PUT',
+              headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                uris: artistIds.slice(0, 100).map(id => `spotify:artist:${id}`)
+              })
+            }).then(() => existingPlaylist.id);
+          } else {
+            return fetch(`https://api.spotify.com/v1/users/${uid}/playlists`, {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                name: playlistName,
+                description: 'Artist category for organizer app',
+                public: false
+              })
+            })
+            .then(res => res.json())
+            .then(newPlaylist => {
+              if (artistIds.length > 0) {
+                return fetch(`https://api.spotify.com/v1/playlists/${newPlaylist.id}/tracks`, {
+                  method: 'POST',
+                  headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json'
+                  },
+                  body: JSON.stringify({
+                    uris: artistIds.slice(0, 100).map(id => `spotify:artist:${id}`)
+                  })
+                }).then(() => newPlaylist.id);
+              }
+              return newPlaylist.id;
+            });
+          }
+        });
+      };
+
+      const deleteCategoryFromSpotify = (token, uid, categoryName) => {
+        const playlistName = CATEGORY_PREFIX + categoryName;
+        
+        return fetch('https://api.spotify.com/v1/me/playlists?limit=50', {
+          headers: { 'Authorization': `Bearer ${token}` }
+        })
+        .then(res => res.json())
+        .then(data => {
+          const playlist = data.items.find(p => 
+            p.name === playlistName && p.owner.id === uid
+          );
+          
+          if (playlist) {
+            return fetch(`https://api.spotify.com/v1/playlists/${playlist.id}/followers`, {
+              method: 'DELETE',
+              headers: { 'Authorization': `Bearer ${token}` }
+            });
+          }
+        });
+      };
+
+      const fetchFollowedArtists = (token) => {
+        const fetchPage = (url, accumulated) => {
+          return fetch(url, {
+            headers: { 'Authorization': `Bearer ${token}` }
+          })
+          .then(res => {
+            if (!res.ok) throw new Error('Failed to fetch');
+            return res.json();
+          })
+          .then(data => {
+            const allArtists = accumulated.concat(data.artists.items);
+            return data.artists.next ? fetchPage(data.artists.next, allArtists) : allArtists;
+          });
+        };
+        
+        return fetchPage('https://api.spotify.com/v1/me/following?type=artist&limit=50', [])
+          .then(allArtists => {
             setArtists(allArtists);
             
             const categorizedIds = new Set();
-            Object.values(categories).forEach(function(cat) {
-              cat.forEach(function(id) { categorizedIds.add(id); });
+            Object.values(categories).forEach(cat => cat.forEach(id => categorizedIds.add(id)));
+            
+            const currentArtistIds = new Set(allArtists.map(a => a.id));
+            
+            const unfollowedIds = new Set();
+            Object.entries(categories).forEach(([catName, artistIds]) => {
+              artistIds.forEach(id => {
+                if (!currentArtistIds.has(id)) {
+                  unfollowedIds.add(id);
+                }
+              });
             });
             
-            const uncategorized = allArtists.filter(function(a) { 
-              return !categorizedIds.has(a.id); 
-            }).map(function(a) { return a.id; });
+            const uncategorized = allArtists
+              .filter(a => !categorizedIds.has(a.id))
+              .map(a => a.id);
+            
+            let updated = { ...categories };
+            
+            if (unfollowedIds.size > 0) {
+              Object.keys(updated).forEach(catName => {
+                updated[catName] = updated[catName].filter(id => !unfollowedIds.has(id));
+              });
+            }
             
             if (uncategorized.length > 0) {
-              const updated = Object.assign({}, categories, {
-                'Uncategorized': (categories.Uncategorized || []).concat(uncategorized)
-              });
-              setCategories(updated);
-              localStorage.setItem('spotifyCategories', JSON.stringify(updated));
+              updated['Uncategorized'] = [...(updated.Uncategorized || []), ...uncategorized];
             }
-            setLoading(false);
-          })
-          .catch(function(error) {
-            console.error('Error:', error);
-            setLoading(false);
+            
+            if (unfollowedIds.size > 0 || uncategorized.length > 0) {
+              setCategories(updated);
+              if (accessToken && userId) {
+                Object.entries(updated).forEach(([catName, artistIds]) => {
+                  saveCategoryToSpotify(accessToken, userId, catName, artistIds);
+                });
+              }
+            }
+            
+            return allArtists;
           });
       };
 
@@ -189,7 +343,9 @@
         if (newCategoryName.trim() && !categories[newCategoryName]) {
           const updated = { ...categories, [newCategoryName]: [] };
           setCategories(updated);
-          localStorage.setItem('spotifyCategories', JSON.stringify(updated));
+          saveCategoryToSpotify(accessToken, userId, newCategoryName, [])
+            .then(() => showStatus('✓ Category created'))
+            .catch(err => showStatus('✗ Error creating category'));
           setNewCategoryName('');
           setShowNewCategory(false);
         }
@@ -200,7 +356,13 @@
         const { [categoryName]: deleted, ...rest } = categories;
         const updated = { ...rest, 'Uncategorized': [...rest.Uncategorized, ...deleted] };
         setCategories(updated);
-        localStorage.setItem('spotifyCategories', JSON.stringify(updated));
+        
+        deleteCategoryFromSpotify(accessToken, userId, categoryName)
+          .then(() => {
+            saveCategoryToSpotify(accessToken, userId, 'Uncategorized', updated['Uncategorized']);
+            showStatus('✓ Category deleted');
+          })
+          .catch(err => showStatus('✗ Error deleting category'));
       };
 
       const moveArtist = (artistId, fromCategory, toCategory) => {
@@ -208,14 +370,32 @@
         updated[fromCategory] = updated[fromCategory].filter(id => id !== artistId);
         updated[toCategory] = [...updated[toCategory], artistId];
         setCategories(updated);
-        localStorage.setItem('spotifyCategories', JSON.stringify(updated));
+        
+        Promise.all([
+          saveCategoryToSpotify(accessToken, userId, fromCategory, updated[fromCategory]),
+          saveCategoryToSpotify(accessToken, userId, toCategory, updated[toCategory])
+        ])
+        .then(() => showStatus('✓ Artist moved', 1500))
+        .catch(err => showStatus('✗ Error moving artist'));
       };
 
       const syncWithSpotify = () => {
-        if (accessToken) {
+        if (accessToken && userId) {
           setSyncing(true);
-          fetchFollowedArtists(accessToken);
-          setTimeout(() => setSyncing(false), 1000);
+          showStatus('🔄 Syncing with Spotify...');
+          
+          Promise.all([
+            fetchFollowedArtists(accessToken),
+            loadCategoriesFromSpotify(accessToken, userId)
+          ])
+          .then(() => {
+            setSyncing(false);
+            showStatus('✓ Sync complete!');
+          })
+          .catch(err => {
+            setSyncing(false);
+            showStatus('✗ Sync failed');
+          });
         }
       };
 
@@ -236,7 +416,8 @@
             h('p', { className: 'text-gray-400 mb-6' }, 'Organize your followed artists into custom categories'),
             h('div', { className: 'bg-gray-800 border border-gray-700 rounded p-4 mb-6 text-left text-sm' },
               h('p', { className: 'text-gray-300 mb-2' }, 'Connect your Spotify account to start organizing your followed artists into custom categories.'),
-              h('p', { className: 'text-gray-400 text-xs' }, 'Your data is stored locally in your browser.')
+              h('p', { className: 'text-green-400 text-xs font-semibold mb-2' }, '✓ Syncs across all your devices'),
+              h('p', { className: 'text-gray-400 text-xs' }, 'Your categories are stored privately in your Spotify account as hidden playlists.')
             ),
             h('button', {
               onClick: handleLogin,
@@ -257,6 +438,9 @@
 
       return h('div', { className: 'min-h-screen bg-gradient-to-br from-green-900 via-black to-black p-4' },
         h('div', { className: 'max-w-6xl mx-auto' },
+          statusMessage && h('div', { className: 'fixed top-4 right-4 bg-gray-900 text-white px-4 py-2 rounded-lg shadow-lg z-50 border border-gray-700' },
+            statusMessage
+          ),
           h('div', { className: 'flex items-center justify-between mb-6 flex-wrap gap-4' },
             h('div', { className: 'flex items-center gap-3' },
               h('div', { className: 'text-4xl' }, '🎵'),
