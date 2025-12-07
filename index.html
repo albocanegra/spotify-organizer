@@ -17,14 +17,11 @@
   <script>
     const { useState, useEffect, createElement: h } = React;
 
+    // PKCE helper functions
     function generateRandomString(length) {
       const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
       const values = crypto.getRandomValues(new Uint8Array(length));
-      let result = '';
-      for (let i = 0; i < length; i++) {
-        result += possible[values[i] % possible.length];
-      }
-      return result;
+      return values.reduce(function(acc, x) { return acc + possible[x % possible.length]; }, "");
     }
 
     function sha256(plain) {
@@ -47,12 +44,14 @@
       const [loading, setLoading] = useState(false);
       const [newCategoryName, setNewCategoryName] = useState('');
       const [showNewCategory, setShowNewCategory] = useState(false);
+      const [syncing, setSyncing] = useState(false);
 
       const CLIENT_ID = 'e21bf88870a94703bc0cdcf317075a5e';
       const REDIRECT_URI = 'https://albocanegra.github.io/spotify-organizer';
       const SCOPES = 'user-follow-read';
 
       useEffect(() => {
+        // Check if we're returning from Spotify auth
         const params = new URLSearchParams(window.location.search);
         const code = params.get('code');
         
@@ -60,9 +59,11 @@
           exchangeCodeForToken(code);
         }
 
+        // Load saved categories
         const saved = localStorage.getItem('spotifyCategories');
         if (saved) setCategories(JSON.parse(saved));
 
+        // Check if we have a valid token
         const token = localStorage.getItem('spotify_access_token');
         const expiry = localStorage.getItem('spotify_token_expiry');
         
@@ -72,10 +73,11 @@
         }
       }, []);
 
-      const handleLogin = () => {
+      const handleLogin = function() {
         const codeVerifier = generateRandomString(64);
-        sha256(codeVerifier).then((hashed) => {
+        sha256(codeVerifier).then(function(hashed) {
           const codeChallenge = base64encode(hashed);
+
           localStorage.setItem('code_verifier', codeVerifier);
 
           const authUrl = new URL('https://accounts.spotify.com/authorize');
@@ -93,13 +95,15 @@
         });
       };
 
-      const exchangeCodeForToken = (code) => {
+      const exchangeCodeForToken = function(code) {
         setLoading(true);
         const codeVerifier = localStorage.getItem('code_verifier');
 
         fetch('https://accounts.spotify.com/api/token', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
           body: new URLSearchParams({
             client_id: CLIENT_ID,
             grant_type: 'authorization_code',
@@ -108,8 +112,8 @@
             code_verifier: codeVerifier,
           }),
         })
-        .then(res => res.json())
-        .then(data => {
+        .then(function(response) { return response.json(); })
+        .then(function(data) {
           if (data.access_token) {
             const expiryTime = Date.now() + (data.expires_in * 1000);
             localStorage.setItem('spotify_access_token', data.access_token);
@@ -123,46 +127,60 @@
             fetchFollowedArtists(data.access_token);
           }
         })
-        .catch(err => {
-          console.error('Error:', err);
+        .catch(function(error) {
+          console.error('Error exchanging code for token:', error);
           setLoading(false);
         });
       };
 
-      const fetchFollowedArtists = (token) => {
+      const fetchFollowedArtists = function(token) {
         setLoading(true);
         
-        const fetchPage = (url, accumulated) => {
+        function fetchPage(url, accumulated) {
           return fetch(url, {
-            headers: { 'Authorization': `Bearer ${token}` }
+            headers: { 'Authorization': 'Bearer ' + token }
           })
-          .then(res => {
-            if (!res.ok) throw new Error('Failed to fetch');
-            return res.json();
+          .then(function(response) {
+            if (!response.ok) {
+              throw new Error('Failed to fetch artists');
+            }
+            return response.json();
           })
-          .then(data => {
+          .then(function(data) {
             const allArtists = accumulated.concat(data.artists.items);
-            return data.artists.next ? fetchPage(data.artists.next, allArtists) : allArtists;
+            
+            if (data.artists.next) {
+              return fetchPage(data.artists.next, allArtists);
+            } else {
+              return allArtists;
+            }
           });
-        };
+        }
         
         fetchPage('https://api.spotify.com/v1/me/following?type=artist&limit=50', [])
-          .then(allArtists => {
+          .then(function(allArtists) {
             setArtists(allArtists);
             
             const categorizedIds = new Set();
-            Object.values(categories).forEach(cat => cat.forEach(id => categorizedIds.add(id)));
-            const uncategorized = allArtists.filter(a => !categorizedIds.has(a.id)).map(a => a.id);
+            Object.values(categories).forEach(function(cat) {
+              cat.forEach(function(id) { categorizedIds.add(id); });
+            });
+            
+            const uncategorized = allArtists.filter(function(a) { 
+              return !categorizedIds.has(a.id); 
+            }).map(function(a) { return a.id; });
             
             if (uncategorized.length > 0) {
-              const updated = { ...categories, 'Uncategorized': [...(categories.Uncategorized || []), ...uncategorized] };
+              const updated = Object.assign({}, categories, {
+                'Uncategorized': (categories.Uncategorized || []).concat(uncategorized)
+              });
               setCategories(updated);
               localStorage.setItem('spotifyCategories', JSON.stringify(updated));
             }
             setLoading(false);
           })
-          .catch(err => {
-            console.error('Error:', err);
+          .catch(function(error) {
+            console.error('Error:', error);
             setLoading(false);
           });
       };
@@ -191,6 +209,21 @@
         updated[toCategory] = [...updated[toCategory], artistId];
         setCategories(updated);
         localStorage.setItem('spotifyCategories', JSON.stringify(updated));
+      };
+
+      const syncWithSpotify = () => {
+        if (accessToken) {
+          setSyncing(true);
+          fetchFollowedArtists(accessToken);
+          setTimeout(() => setSyncing(false), 1000);
+        }
+      };
+
+      const scrollToCategory = (categoryName) => {
+        const element = document.getElementById(`category-${categoryName}`);
+        if (element) {
+          element.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
       };
 
       const getArtistById = (id) => artists.find(a => a.id === id);
@@ -230,10 +263,31 @@
               h('h1', { className: 'text-2xl font-bold text-white' }, 'My Artist Library'),
               h('span', { className: 'bg-green-500 text-black px-3 py-1 rounded-full text-sm font-semibold' }, `${artists.length} artists`)
             ),
-            h('button', {
-              onClick: () => setShowNewCategory(!showNewCategory),
-              className: 'bg-green-500 hover:bg-green-600 text-black font-semibold py-2 px-4 rounded-full'
-            }, '➕ New Category')
+            h('div', { className: 'flex gap-2 flex-wrap' },
+              h('select', {
+                onChange: (e) => {
+                  if (e.target.value) {
+                    scrollToCategory(e.target.value);
+                    e.target.value = '';
+                  }
+                },
+                className: 'bg-gray-800 text-white px-4 py-2 rounded-full border border-gray-700 cursor-pointer text-sm'
+              },
+                h('option', { value: '' }, '📂 Jump to Category...'),
+                Object.keys(categories).map(cat => 
+                  h('option', { key: cat, value: cat }, `${cat} (${categories[cat].length})`)
+                )
+              ),
+              h('button', {
+                onClick: syncWithSpotify,
+                disabled: syncing,
+                className: 'bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-4 rounded-full text-sm disabled:opacity-50'
+              }, syncing ? '🔄 Syncing...' : '🔄 Sync'),
+              h('button', {
+                onClick: () => setShowNewCategory(!showNewCategory),
+                className: 'bg-green-500 hover:bg-green-600 text-black font-semibold py-2 px-4 rounded-full'
+              }, '➕ New Category')
+            )
           ),
           showNewCategory && h('div', { className: 'bg-gray-900 rounded-lg p-4 mb-6 flex flex-col sm:flex-row gap-2' },
             h('input', {
@@ -256,7 +310,11 @@
           h('div', { className: 'space-y-6' },
             Object.entries(categories).map(([categoryName, artistIds]) => {
               const categoryArtists = artistIds.map(id => getArtistById(id)).filter(Boolean);
-              return h('div', { key: categoryName, className: 'bg-gray-900 rounded-lg p-4' },
+              return h('div', { 
+                key: categoryName, 
+                id: `category-${categoryName}`,
+                className: 'bg-gray-900 rounded-lg p-4 scroll-mt-6'
+              },
                 h('div', { className: 'flex items-center justify-between mb-4' },
                   h('div', { className: 'flex items-center gap-2' },
                     h('div', { className: 'text-2xl' }, '📁'),
